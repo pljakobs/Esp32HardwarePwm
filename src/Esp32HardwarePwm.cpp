@@ -2,7 +2,7 @@
  * @author  Peter Jakobs http://github.com/pljakobs
  */
 
-#include "Esp32HardwarePwm.h"
+#include "include/Esp32HardwarePwm.h"
 // HW_PWM_DEBUG controls logging for this component only (0=off, 1=errors, 2=+info, 3=full).
 // Set via -DHW_PWM_DEBUG=<level> in your Makefile or component.mk (default: 0).
 #ifndef HW_PWM_DEBUG
