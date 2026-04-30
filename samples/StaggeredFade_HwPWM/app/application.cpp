@@ -61,9 +61,9 @@ void startChannel(uint8_t ch)
 {
 	pwm.setQueueMode(ch, Esp32HardwarePwm::QueueMode::CYCLIC);
 	pwm.setQueueCapacity(ch, 3);
-	pwm.fadePercentChan(ch, PEAK_PCT, ATTACK_MS, true, true);	   // 0% → 80%
+	pwm.fadePercentChan(ch, PEAK_PCT, ATTACK_MS, true, true);	 // 0% → 80%
 	pwm.fadePercentChan(ch, RELEASE_PCT, RELEASE_MS, true, true); // 80% → 10%
-	pwm.fadePercentChan(ch, 0, 600, false, true);						  // 10% → 0%
+	pwm.fadePercentChan(ch, 0, 600, false, true);				  // 10% → 0%
 
 	pwm.startQueue(ch);
 	Serial.printf("CH%u started\n", (unsigned)ch);

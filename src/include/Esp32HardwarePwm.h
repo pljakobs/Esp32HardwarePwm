@@ -168,7 +168,9 @@ public:
      * @brief Construct PWM instance with default configuration
      * @param pins Vector of GPIO pins to control
      */
-	Esp32HardwarePwm(std::vector<uint8_t>& pins);
+	Esp32HardwarePwm(std::vector<uint8_t>& pins) : Esp32HardwarePwm(pins, Config{})
+	{
+	}
 
 	/**
      * @brief Construct PWM instance with custom configuration
@@ -278,10 +280,12 @@ public:
      */
 	bool setDutyChanPercent(uint8_t channel, DutyCycle percentage, bool update_immediately = true, bool cie = false)
 	{
-		if(percentage < 0.0f)
+		if(percentage < 0.0f) {
 			percentage = 0.0f;
-		if(percentage > 100.0f)
+		}
+		if(percentage > 100.0f) {
 			percentage = 100.0f;
+		}
 		float Y = cie ? cie1931Linear(percentage) : (percentage / 100.0f);
 		return setDutyChan(channel, static_cast<uint32_t>(Y * getMaxDuty()), update_immediately);
 	}
@@ -295,8 +299,9 @@ public:
 	{
 		uint32_t duty = getDutyChan(channel);
 		uint32_t max_duty = getMaxDuty();
-		if(max_duty == 0)
+		if(max_duty == 0) {
 			return 0.0f;
+		}
 		float Y = static_cast<float>(duty) / max_duty;
 		return cie ? cie1931Inverse(Y) : (Y * 100.0f);
 	}
@@ -317,10 +322,12 @@ public:
      */
 	bool setPhaseShiftChanPercent(uint8_t channel, DutyCycle percentage, bool update_immediately = true)
 	{
-		if(percentage < 0.0f)
+		if(percentage < 0.0f) {
 			percentage = 0.0f;
-		if(percentage > 100.0f)
+		}
+		if(percentage > 100.0f) {
 			percentage = 100.0f;
+		}
 		uint32_t phase_shift = static_cast<uint32_t>(percentage * getMaxDuty() / 100.0f);
 		return setPhaseShiftChan(channel, phase_shift, update_immediately);
 	}
@@ -354,12 +361,14 @@ public:
 	 * @return true if started/enqueued successfully
 	 */
 	bool fadePercentChan(uint8_t channel_idx, DutyCycle target_pct, uint32_t fade_time_ms, bool cie = false,
-	                     bool queue = false)
+						 bool queue = false)
 	{
-		if(target_pct < 0.0f)
+		if(target_pct < 0.0f) {
 			target_pct = 0.0f;
-		if(target_pct > 100.0f)
+		}
+		if(target_pct > 100.0f) {
 			target_pct = 100.0f;
+		}
 		float Y = cie ? cie1931Linear(target_pct) : (target_pct / 100.0f);
 		return fadeChan(channel_idx, static_cast<uint32_t>(Y * getMaxDuty()), fade_time_ms, queue);
 	}
@@ -379,7 +388,6 @@ public:
 
 	/** @brief Get current queue mode for a channel */
 	QueueMode getQueueMode(uint8_t channel) const;
-
 
 	uint16_t getQueueEntries(uint8_t channel) const;
 
@@ -516,8 +524,9 @@ public:
 	bool setDutyPin(uint8_t pin, uint32_t duty, bool update_immediately = true)
 	{
 		int idx = getPinIndex(pin);
-		if(idx < 0)
+		if(idx < 0) {
 			return false;
+		}
 		return setDutyChan((uint8_t)idx, duty, update_immediately);
 	}
 
@@ -528,8 +537,9 @@ public:
 	uint32_t getDutyPin(uint8_t pin)
 	{
 		int idx = getPinIndex(pin);
-		if(idx < 0)
+		if(idx < 0) {
 			return 0;
+		}
 		return getDutyChan((uint8_t)idx);
 	}
 
@@ -638,8 +648,9 @@ private:
 	int getPinIndex(uint8_t gpioPin) const
 	{
 		for(size_t i = 0; i < pins_.size(); ++i) {
-			if(pins_[i].gpioPin == gpioPin)
+			if(pins_[i].gpioPin == gpioPin) {
 				return (int)i;
+			}
 		}
 		return -1;
 	}
@@ -652,8 +663,9 @@ private:
 	PinConfig* getPinConfig(uint8_t gpioPin)
 	{
 		for(auto& pin : pins_) {
-			if(pin.gpioPin == gpioPin)
+			if(pin.gpioPin == gpioPin) {
 				return &pin;
+			}
 		}
 		return nullptr;
 	}
@@ -714,12 +726,15 @@ private:
 	// -----------------------------------------------------------------
 	static float cie1931Linear(float L)
 	{
-		if(L <= 0.0f)
+		if(L <= 0.0f) {
 			return 0.0f;
-		if(L >= 100.0f)
+		}
+		if(L >= 100.0f) {
 			return 1.0f;
-		if(L <= 8.0f)
+		}
+		if(L <= 8.0f) {
 			return L / 902.3f;
+		}
 		float t = (L + 16.0f) / 116.0f;
 		return t * t * t;
 	}
@@ -730,12 +745,15 @@ private:
 	//   Y  > 0.008856  →  L = 116 × ∛Y − 16
 	static float cie1931Inverse(float Y)
 	{
-		if(Y <= 0.0f)
+		if(Y <= 0.0f) {
 			return 0.0f;
-		if(Y >= 1.0f)
+		}
+		if(Y >= 1.0f) {
 			return 100.0f;
-		if(Y <= 0.008856f)
+		}
+		if(Y <= 0.008856f) {
 			return Y * 903.3f;
+		}
 		return 116.0f * cbrtf(Y) - 16.0f;
 	}
 };

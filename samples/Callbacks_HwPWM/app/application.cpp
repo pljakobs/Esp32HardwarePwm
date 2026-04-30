@@ -153,11 +153,11 @@ void startDemo()
 	// -------------------------------------------------------------------
 	pwm.setQueueCapacity(CH_FADE_DONE, 6);
 	pwm.setQueueAutoStart(CH_FADE_DONE, true);
-pwm.fadePercentChan(CH_FADE_DONE, 0.0f, STEP_MS, false, true);
-		pwm.fadePercentChan(CH_FADE_DONE, 25.0f, STEP_MS, false, true);
-		pwm.fadePercentChan(CH_FADE_DONE, 75.0f, STEP_MS, false, true);
-		pwm.fadePercentChan(CH_FADE_DONE, 100.0f, STEP_MS, false, true);
-		pwm.fadePercentChan(CH_FADE_DONE, 50.0f, STEP_MS, false, true);
+	pwm.fadePercentChan(CH_FADE_DONE, 0.0f, STEP_MS, false, true);
+	pwm.fadePercentChan(CH_FADE_DONE, 25.0f, STEP_MS, false, true);
+	pwm.fadePercentChan(CH_FADE_DONE, 75.0f, STEP_MS, false, true);
+	pwm.fadePercentChan(CH_FADE_DONE, 100.0f, STEP_MS, false, true);
+	pwm.fadePercentChan(CH_FADE_DONE, 50.0f, STEP_MS, false, true);
 
 	// -------------------------------------------------------------------
 	// CH1 — onQueueEmpty: initial 3-step FIFO load
@@ -171,10 +171,10 @@ pwm.fadePercentChan(CH_FADE_DONE, 0.0f, STEP_MS, false, true);
 	// -------------------------------------------------------------------
 	pwm.setQueueCapacity(CH_CYCLIC_WRAP, 5);
 	pwm.setQueueMode(CH_CYCLIC_WRAP, Esp32HardwarePwm::QueueMode::CYCLIC);
-		pwm.fadePercentChan(CH_CYCLIC_WRAP, 0.0f, STEP_MS, false, true);
-		pwm.fadePercentChan(CH_CYCLIC_WRAP, 100.0f, STEP_MS, false, true);
-		pwm.fadePercentChan(CH_CYCLIC_WRAP, 20.0f, STEP_MS, false, true);
-		pwm.fadePercentChan(CH_CYCLIC_WRAP, 100.0f, STEP_MS, false, true);
+	pwm.fadePercentChan(CH_CYCLIC_WRAP, 0.0f, STEP_MS, false, true);
+	pwm.fadePercentChan(CH_CYCLIC_WRAP, 100.0f, STEP_MS, false, true);
+	pwm.fadePercentChan(CH_CYCLIC_WRAP, 20.0f, STEP_MS, false, true);
+	pwm.fadePercentChan(CH_CYCLIC_WRAP, 100.0f, STEP_MS, false, true);
 	pwm.startQueue(CH_CYCLIC_WRAP);
 
 	// -------------------------------------------------------------------

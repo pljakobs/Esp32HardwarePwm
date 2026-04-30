@@ -1,0 +1,12 @@
+name: CI Push
+
+on:
+  push:
+    branches:
+    - devel
+  pull_request:
+
+
+jobs:
+  build:
+    uses: SmingHub/Sming/.github/workflows/library.yml@develop
