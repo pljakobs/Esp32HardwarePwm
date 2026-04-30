@@ -3,7 +3,7 @@ name: CI Push
 on:
   push:
     branches:
-    - devel
+    - develop
   pull_request:
 
 
