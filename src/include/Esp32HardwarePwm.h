@@ -243,6 +243,8 @@ public:
 
 	/** @brief Apply pending duty changes to all channels
      * @note Only needed when update_immediately was set to false
+     * @note Channels with a hardware fade in progress are skipped; latching
+     *       them would restart the fade and its completion callback would never fire.
      */
 	void update();
 

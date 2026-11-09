@@ -368,9 +368,12 @@ void Esp32HardwarePwm::update()
 		return;
 	}
 
-	// Update all channels
-	for(const auto& pin : pins_) {
-		if(pin.isActive) {
+	// Update all channels. Skip channels with a fade in flight: ledc_update_duty()
+	// re-asserts duty_start, which restarts the hardware fade from its start duty
+	// and prevents the fade-end interrupt from ever firing.
+	for(size_t i = 0; i < pins_.size(); ++i) {
+		const auto& pin = pins_[i];
+		if(pin.isActive && fadeDone_[i]) {
 			ledc_update_duty(timer_.speed_mode, pin.channel);
 		}
 	}
