@@ -415,7 +415,7 @@ bool Esp32HardwarePwm::setDutyChan(uint8_t channel, uint32_t duty, bool update_i
 		debug_i("Updating duty for pin %d channel %d", cfg.gpioPin, cfg.channel);
 		ledc_update_duty(timer_.speed_mode, cfg.channel);
 	} else {
-		debug_i("duty for pin %d channel %d will be updated on next update() call");
+		debug_i("duty for pin %d channel %d will be updated on next update() call", cfg.gpioPin, cfg.channel);
 	}
 	return true;
 }
