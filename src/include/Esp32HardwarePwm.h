@@ -340,10 +340,15 @@ public:
 	/** @brief Enable hardware fade functionality
      * @return true if successful, false otherwise
      * @note Called automatically by the constructor; exposed for manual control.
+     *       The LEDC fade service is global and remains installed after this
+     *       instance is destroyed or fade is disabled.
      */
 	bool enableFade();
 
-	/** @brief Disable hardware fade functionality */
+	/** @brief Disable fades for this instance and abort its pending fades
+     * @note Stopping an in-progress hardware fade is SoC-dependent.
+     * @note The global LEDC fade service remains installed for other users.
+     */
 	void disableFade();
 
 	/** @brief Hardware linear fade on a channel (absolute duty target).
@@ -628,7 +633,7 @@ private:
 	std::vector<ChannelFadeQueue> fadeQueues_;
 
 	bool initialized_ = false;
-	bool fadeInstalled_ = false;
+	bool fadeEnabled_ = false;
 
 	// Per-channel fade-done flags, set from LEDC fade callback (ISR-safe)
 	std::array<volatile bool, SOC_LEDC_CHANNEL_NUM> fadeDone_{};
