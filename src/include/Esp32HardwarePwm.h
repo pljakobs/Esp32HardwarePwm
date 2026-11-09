@@ -69,9 +69,8 @@
  *
  * **Hardware fading**
  * - Single-shot linear fades: `fadeChan` / `fadePercentChan`
- * - Automatic splitting of large-range fades to avoid the LEDC
- *   `step_num ≤ 1023` quantisation limit (up to −18 % timing error at 12-bit
- *   without splitting)
+ * - Automatic splitting of slow large-range fades into <=1023-count segments
+ * - Nearest integer cycle selection with signed timing error carried between segments
  *
  * **Fade queue**
  * - Per-channel ring-buffer queue (`fadeChan(..., queue=true)`) in FIFO or CYCLIC mode
@@ -351,6 +350,9 @@ public:
 	 * @param channel_idx Channel index
 	 * @param target_duty Target duty value (0 to getMaxDuty())
 	 * @param fade_time_ms Duration in milliseconds
+	 * @note Slow fades select the nearest PWM cycle count and carry timing error
+	 *       between queued segments. Individual segments can run longer or shorter
+	 *       than requested. Fast fades retain IDF scale selection.
 	 * @param queue If false (default), resets the queue and starts immediately.
 	 *              If true, enqueues the fade for sequential playback.
 	 * @return true if started/enqueued successfully
@@ -464,6 +466,8 @@ public:
 	/** @brief Override the per-reload overhead used to correct queued fade durations.
 	 * Normally auto-computed as (1 PWM period + DISPATCH_LATENCY_US) by the
 	 * constructor and by setFrequency().  Set to 0 to disable correction.
+	 * This only disables reload compensation; nearest-cycle selection and its
+	 * signed carry remain active for slow fades. Changing it resets both carries.
 	 * @param channel Channel index
 	 * @param overheadUs Overhead to deduct per reload, in microseconds
 	 */
@@ -595,9 +599,8 @@ private:
 		bool autoStart = true; ///< If true, playback starts on first fadeChan(queue=true); false requires startQueue()
 		uint32_t reloadOverheadUs = 0;	 ///< Per-reload overhead subtracted from each step (µs)
 		int32_t carryUs = 0;			   ///< Sub-ms accumulator for reload overhead correction
-		int32_t quantCarryUs = 0;		   ///< Sub-µs accumulator for cycle_num truncation correction
+		int64_t quantCarryUs = 0;		   ///< Signed requested-minus-selected hardware time, in microseconds
 		bool activeIsIntermediate = false; ///< True when the executing entry is a partial (intermediate) split segment
-		bool warnedLowCycleNum = false;	///< Suppress repeat low-cycle_num warnings for this channel
 	};
 
 	struct PinConfig {
