@@ -244,11 +244,14 @@ void stopAll(uint8_t idle_level = 0);
 
 #### Hardware Fade
 
-Fade support is installed automatically on first use.
+Fade support is installed automatically on first use. The LEDC fade service is
+shared globally, so destroying an instance or calling `disableFade()` never
+uninstalls it. `disableFade()` only cancels fades owned by that instance;
+stopping an in-progress hardware fade is SoC-dependent.
 
 ```cpp
-bool enableFade();    // install LEDC fade ISR (called automatically by fade methods)
-void disableFade();
+bool enableFade();    // enable fades for this instance (called automatically)
+void disableFade();   // cancel this instance's fades; leaves the shared service installed
 
 // Immediate fade (resets queue, starts now); queue=true enqueues instead
 bool fadeChan(uint8_t channel, uint32_t target_duty, uint32_t fade_time_ms, bool queue = false);

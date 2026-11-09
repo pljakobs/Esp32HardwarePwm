@@ -279,10 +279,6 @@ Esp32HardwarePwm::~Esp32HardwarePwm()
 		}
 	}
 
-	if(fadeInstalled_) {
-		ledc_fade_func_uninstall();
-	}
-
 	if(spreadSpectrumTimer_ != nullptr) {
 		esp_timer_stop(spreadSpectrumTimer_);
 		esp_timer_delete(spreadSpectrumTimer_);
@@ -463,13 +459,13 @@ bool Esp32HardwarePwm::setPhaseShiftChan(uint8_t channel, uint32_t phase_shift, 
 
 bool Esp32HardwarePwm::enableFade()
 {
-	if(fadeInstalled_) {
+	if(fadeEnabled_) {
 		return true;
 	}
 
 	esp_err_t result = ledc_fade_func_install(0);
 	if(result == ESP_OK || result == ESP_ERR_INVALID_STATE) {
-		fadeInstalled_ = true;
+		fadeEnabled_ = true;
 		return true;
 	}
 	debug_e("Failed to enable fade: %s", esp_err_to_name(result));
@@ -478,16 +474,20 @@ bool Esp32HardwarePwm::enableFade()
 
 void Esp32HardwarePwm::disableFade()
 {
-	if(fadeInstalled_) {
-		ledc_fade_func_uninstall(); // disable hardware fade
-		fadeInstalled_ = false;
+	if(fadeEnabled_) {
+		if(initialized_) {
+			for(uint8_t channel = 0; channel < pins_.size(); ++channel) {
+				abortFadeChan(channel);
+			}
+		}
+		fadeEnabled_ = false;
 		debug_i("Fade functionality disabled");
 	}
 }
 
 bool Esp32HardwarePwm::fadeHwChan(uint8_t channel_idx, uint32_t target_duty, uint32_t fade_time_ms)
 {
-	if(!initialized_ || !fadeInstalled_ || channel_idx >= pins_.size()) {
+	if(!initialized_ || !fadeEnabled_ || channel_idx >= pins_.size()) {
 		debug_e("fadeHwChan: not initialized, fade not installed, or channel %d out of range", channel_idx);
 		return false;
 	}
@@ -531,13 +531,18 @@ bool Esp32HardwarePwm::fadeChan(uint8_t channel_idx, uint32_t target_duty, uint3
 
 void Esp32HardwarePwm::abortFadeChan(uint8_t channel_idx)
 {
+	bool wasFading = !fadeDone_[channel_idx];
 	resetQueue(channel_idx);
 	steadyFadeTimers_[channel_idx]->stop();
 #if SOC_LEDC_SUPPORT_FADE_STOP
-	ledc_fade_stop(timer_.speed_mode, pins_[channel_idx].channel);
+	if(wasFading) {
+		ledc_fade_stop(timer_.speed_mode, pins_[channel_idx].channel);
+	}
 #else
 	// Classic ESP32 cannot abort a hardware fade in progress
-	debug_w("abortFadeChan: hardware fade on channel %d cannot be stopped on this SoC", channel_idx);
+	if(wasFading) {
+		debug_w("abortFadeChan: hardware fade on channel %d cannot be stopped on this SoC", channel_idx);
+	}
 #endif
 	// Discard a fade-end notification that may already be pending for this channel
 	pendingFadeCallbacks_.fetch_and(~(1u << channel_idx), std::memory_order_relaxed);
@@ -974,7 +979,7 @@ void Esp32HardwarePwm::resetQueue(uint8_t channel)
 
 bool Esp32HardwarePwm::startQueue(uint8_t channel)
 {
-	if(!initialized_ || !fadeInstalled_ || channel >= pins_.size()) {
+	if(!initialized_ || !fadeEnabled_ || channel >= pins_.size()) {
 		return false;
 	}
 	if(isFadingChan(channel)) {
@@ -1046,7 +1051,7 @@ uint32_t Esp32HardwarePwm::getReloadOverheadUs(uint8_t channel) const
 
 bool Esp32HardwarePwm::queueDutyChan(uint8_t channel, uint32_t targetDuty, uint32_t fadeTimeMs)
 {
-	if(!initialized_ || !fadeInstalled_ || channel >= pins_.size()) {
+	if(!initialized_ || !fadeEnabled_ || channel >= pins_.size()) {
 		debug_e("queueDutyChan: not initialized, fade not installed, or channel %d out of range", channel);
 		return false;
 	}
