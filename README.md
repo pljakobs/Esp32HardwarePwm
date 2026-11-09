@@ -332,79 +332,62 @@ choose the right timer configuration and set realistic expectations.
 
 ### 1. Duty-step quantisation (applies to every fade call)
 
-`ledc_set_fade_time_and_start` translates a requested fade duration into integer
-hardware parameters:
+For slow fades (at least one PWM period per duty increment), IDF's time API
+would truncate the number of periods per duty step:
 
 ```
-cycles_per_step = floor(fade_ms × timer_freq_Hz / duty_levels)
-actual_ms       = duty_levels × cycles_per_step × (1 / timer_freq_Hz) × 1000
+cycles_per_step = floor(fade_ms × timer_freq_Hz / (1000 × duty_range))
+actual_ms       = duty_range × cycles_per_step × 1000 / timer_freq_Hz
 ```
 
-Because of the `floor`, the actual duration is always **shorter** than requested.
-The total shortfall is determined by the remainder of the division:
+The library instead calls `ledc_set_fade_step_and_start` with scale 1 and the
+nearest integer cycle count. Each channel carries signed requested-minus-selected
+time into the next slow segment, after subtracting its configured reload overhead:
 
 ```
-error_ms = (fade_ms × timer_freq_Hz  mod  duty_levels) / timer_freq_Hz
+budget_us       = fade_ms × 1000 − reloadOverheadUs + carried_error_us
+cycles_per_step = nearest(budget_us × timer_freq_Hz / (duty_range × 1000000))
+carried_error_us = budget_us − selected_hardware_duration_us
 ```
 
-The error depends on how evenly the fade duration divides into duty steps — it
-is **not** a simple function of bit depth or frequency alone.  Higher frequency
-generally reduces the error (more cycles to distribute), but the specific
-fade duration matters.  The maximum possible shortfall is one timer period
-(when the remainder equals `duty_levels − 1`).
+Cycle counts are clamped to 1..1023. Unachievable timing debt at either limit
+is discarded rather than carried indefinitely. Microsecond rounding of the
+selected duration introduces at most half a microsecond per segment.
+Queue reset/preemption, frequency changes, and reload-overhead changes clear
+the timing accumulators. FIFO and CYCLIC playback share the same selection.
 
-### 1a. Low `cycle_num` regime — large timing error and diagnostic warning
+No extra segments, interrupts, or timers are added. However, individual segments
+can run longer or shorter than requested, with different slopes; there is no
+500 ms cap. When not clamped, cumulative model error is about half the final
+segment's timing quantum (`duty_range / frequency` seconds), not half one PWM
+period. Existing proportional splitting can also lose fractional milliseconds.
+This models hardware stepping, not measured wall-clock deadlines.
 
-The hardware parameter `cycle_num` is the number of full PWM timer cycles the
-LEDC peripheral spends at each duty step:
+For example, at 8 kHz/12-bit a 3000 ms full-range fade has five 819-count
+segments. Selecting 5 periods for one segment and 6 for four gives a model
+duration of 2968.875 ms, instead of IDF truncation's 2559.375 ms. Endpoint
+handling and dispatch add overhead on real hardware.
 
-```
-cycle_num = floor(freq_Hz × fade_ms / (1000 × duty_range))
-```
+### 1a. Fast fades and hardware limits
 
-where `duty_range` is the absolute difference between start and target duty
-values.  When `cycle_num` is small the integer truncation from `floor` is a
-large fraction of the true value, so the actual fade duration is much shorter
-than requested.  For example:
+When there are fewer requested PWM periods than duty increments, the library
+retains `ledc_set_fade_time_and_start`, including IDF's duty-scale selection and
+the existing sub-millisecond reload-overhead accumulator. Nearest cycle
+selection does not correct this scale-based regime. This includes a 3000 ms
+full-range 12-bit fade at 1 kHz: IDF selects scale 1, which can run substantially
+longer than requested. Higher scales also have quantisation and endpoint costs.
 
-| cycle_num | Typical timing error |
-|---|---|
-| 1 | up to −50 % |
-| 3 | up to −25 % |
-| 10 | up to −9 % |
-| ≥ 20 | < 5 % (library threshold) |
-
-The library warns once per channel whenever `1 ≤ cycle_num < 20`:
-
-```
-fadeChan: ch0 cycle_num=3 (< 20) — fade may be 929 ms short (hw limit).
-Fix: increase fadeTimeMs, lower resolution, or raise frequency to >= 20475 Hz
-```
-
-The warning includes the minimum frequency needed to reach `cycle_num == 20` for
-that specific `(fade_ms, duty_range)` combination — raising the frequency is the
-lowest-impact fix when the PWM period is not otherwise constrained.
-
-**What causes this?**  `cycle_num` decreases when:
-- The fade duration is short relative to the duty range (fast fades over a wide range).
-- The PWM frequency is low (long timer periods give fewer cycles per millisecond).
-- The duty resolution is high (more steps means more time needed per step).
-
-**How to fix it** — choose any combination that brings `cycle_num ≥ 20`:
-1. **Increase `fadeTimeMs`** — gives LEDC more total timer cycles to distribute.
-2. **Lower the duty resolution** — fewer steps means more cycles per step.
-3. **Raise the PWM frequency** to at least the value printed in the warning.
-
-`cycle_num == 0` is a separate case where the requested duration is shorter than
-one full timer cycle.  LEDC clamps to 1 cycle, so the fade runs *longer* than
-requested.  No warning is issued for this case because the error direction is
-reversed and the magnitude is bounded by one timer period.
+The slow path reads the live hardware duty and PWM frequency when selecting
+cycles. Spread spectrum can subsequently change that frequency during a
+segment, so timing accuracy under modulation is not guaranteed. Likewise,
+application polling delays, busy task queues and network delivery are not
+repaid by this arithmetic correction.
 
 ### 2. Queue-reload latency (applies to every step when chaining short fades)
 
 When the LEDC fade-done ISR fires, the library posts a FreeRTOS message to the
 Sming main-task queue.  The main task dequeues the entry and calls
-`ledc_set_fade_time_and_start` for the next step.  Three sub-sources contribute:
+the IDF fade-start API for the next step. Three sub-sources contribute:
 
 | Sub-source | Typical cost |
 |---|---|
@@ -427,7 +410,8 @@ eliminated without a custom IDF patch that chains fades from within the ISR.
 
 ### Measured results
 
-The following table was produced by `samples/TimingTest_HwPWM` running a 60 s
+The following historical table predates carried nearest-cycle selection. It
+was produced by `samples/TimingTest_HwPWM` running a 60 s
 fade on an ESP32 (3000 × 20 ms micro-fades for the reload overhead measurement):
 
 | Config       | Quant. error (single 60 s fade) |          | Reload overhead (3000 × 20 ms steps) |              |
