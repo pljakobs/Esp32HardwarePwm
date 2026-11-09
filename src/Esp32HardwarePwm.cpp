@@ -396,6 +396,15 @@ bool Esp32HardwarePwm::setDutyChan(uint8_t channel, uint32_t duty, bool update_i
 	}
 
 	auto& cfg = pins_[channel];
+
+	// A fixed duty overrides any fade in flight. Otherwise the running fade (and any
+	// queued segments) would carry on and overwrite the new duty when they complete.
+	// This must happen before the no-change check: mid-fade, currentDuty still holds
+	// the fade's start value, not the actual output.
+	if(isFadingChan(channel)) {
+		abortFadeChan(channel);
+	}
+
 	if(cfg.currentDuty == duty) {
 		debug_d("Duty for channel %d already at %d, no update needed", channel, duty);
 		return true; // no change
@@ -409,6 +418,7 @@ bool Esp32HardwarePwm::setDutyChan(uint8_t channel, uint32_t duty, bool update_i
 
 	debug_i("Setting duty for pin %d channel %d: %d", cfg.gpioPin, cfg.channel, duty);
 	cfg.currentDuty = duty;
+	cfg.targetDuty = duty; // the next queued fade computes its range from here
 	ledc_set_duty(timer_.speed_mode, cfg.channel, duty);
 
 	if(update_immediately) {
@@ -514,6 +524,21 @@ bool Esp32HardwarePwm::fadeChan(uint8_t channel_idx, uint32_t target_duty, uint3
 		startNextFade(channel_idx); // preempts in-progress hw fade on this channel only
 	}
 	return ok;
+}
+
+void Esp32HardwarePwm::abortFadeChan(uint8_t channel_idx)
+{
+	resetQueue(channel_idx);
+	steadyFadeTimers_[channel_idx]->stop();
+#if SOC_LEDC_SUPPORT_FADE_STOP
+	ledc_fade_stop(timer_.speed_mode, pins_[channel_idx].channel);
+#else
+	// Classic ESP32 cannot abort a hardware fade in progress
+	debug_w("abortFadeChan: hardware fade on channel %d cannot be stopped on this SoC", channel_idx);
+#endif
+	// Discard a fade-end notification that may already be pending for this channel
+	pendingFadeCallbacks_.fetch_and(~(1u << channel_idx), std::memory_order_relaxed);
+	fadeDone_[channel_idx] = true;
 }
 
 bool Esp32HardwarePwm::isFadingChan(uint8_t channel_idx) const

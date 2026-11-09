@@ -262,6 +262,10 @@ public:
      * @param duty Duty cycle value (0 to getMaxDuty())
      * @param update_immediately Apply changes immediately (default: true)
      * @return true if successful, false otherwise
+     * @note Cancels any fade in flight on the channel and discards its fade queue;
+     *       no fade-done or queue-empty callback is fired for the cancelled fade.
+     *       On the classic ESP32 (no SOC_LEDC_SUPPORT_FADE_STOP) a running hardware
+     *       fade cannot be aborted, only its queue and callbacks are discarded.
      */
 	bool setDutyChan(uint8_t channel, uint32_t duty, bool update_immediately = true);
 
@@ -707,6 +711,9 @@ private:
 
 	// Start the next fade from the queue; returns false if queue empty
 	bool startNextFade(uint8_t channel_idx);
+
+	// Cancel any in-flight or queued fade on a channel (hardware fade, steady hold, pending callback)
+	void abortFadeChan(uint8_t channel_idx);
 
 	// Raw LEDC hardware fade — used by startNextFade only; bypasses queue and split logic
 	bool fadeHwChan(uint8_t channel_idx, uint32_t target_duty, uint32_t fade_time_ms);
