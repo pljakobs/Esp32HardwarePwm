@@ -118,8 +118,7 @@ float stepDuty(uint32_t step)
 
 void pushMicroSteps()
 {
-	// Reload overhead correction is applied automatically by the library
-	// (1 PWM period + DISPATCH_LATENCY_US per step, via carry accumulator).
+	// Logical boundaries include Sming dispatch; intermediate splits do not.
 	while(stepsPushed < TOTAL_STEPS) {
 		if(!pwm->fadePercentChan(CH_MICRO, stepDuty(stepsPushed), MICROFADE_MS, false, true))
 			break;
@@ -291,8 +290,8 @@ static constexpr const char* kSocName = _HWPWM_SOC_STR(SMING_SOC);
  *       if scale >= 2: actual ≈ (duty_delta/scale)/freq ≈ requested        (usable)
  *       if scale == 1: actual = duty_delta/freq  (FIXED, unaffected by requested)
  *
- * The library deducts its overhead estimate before calling LEDC, so the actual
- * LEDC fade_time is roughly MICROFADE_MS - formula_overhead ≈ MICROFADE_MS - 2ms.
+ * The worker experiment defaults to zero compensation. An installed table
+ * can still shorten the LEDC request.
  * Integer-ms rounding means the actual call alternates between N and N+1 ms;
  * if that ±1ms straddles a scale=1/scale=2 boundary the timing becomes erratic.
  *
@@ -305,9 +304,8 @@ static bool isHwLimitedMicrofade(uint32_t freq, ledc_timer_bit_t res)
 	if(maxDuty == 0 || freq == 0)
 		return true;
 
-	// Approximate adjusted fade time (after library deducts formula overhead).
-	static constexpr uint32_t DISPATCH_US = 1500;
-	uint32_t overheadUs = DISPATCH_US + 1000000u / freq;
+	// This sample calibrates from zero correction.
+	uint32_t overheadUs = 0;
 	uint32_t overheadMs = overheadUs / 1000;
 	if(overheadMs + 2 >= MICROFADE_MS)
 		return true;
@@ -381,6 +379,7 @@ void printTable()
 	Serial.println(_F("// and rebuild. The library detects and applies this table automatically."));
 	Serial.println();
 	Serial.println(_F("#pragma once"));
+	Serial.println(_F("#define HWPWM_CALIB_WORKER 1"));
 	Serial.printf("#ifndef HWPWM_CALIB_%s_H\n", kSocName);
 	Serial.printf("#define HWPWM_CALIB_%s_H\n", kSocName);
 	Serial.println();
@@ -403,10 +402,10 @@ void printTable()
 		// in the requested fade time causes a discrete scale change (e.g. 5→6) that moves
 		// the actual LEDC duration by 2–5 ms.  The carry-based overhead correction cannot
 		// converge: each iteration flips the sign of the residual.  Let these configs fall
-		// back to the formula in computeReloadOverhead().
+		// back to the uncalibrated zero correction.
 		{
 			uint32_t mxd = (1u << (uint8_t)configs[i].resolution) - 1;
-			uint32_t oh_ms = (1500u + 1000000u / configs[i].frequency) / 1000u;
+			uint32_t oh_ms = 0;
 			uint32_t adj_ms = (MICROFADE_MS > oh_ms) ? (MICROFADE_MS - oh_ms) : 1u;
 			uint32_t cyc = configs[i].frequency * adj_ms / 1000u;
 			uint32_t sc = (cyc > 0u && cyc < mxd) ? (mxd / cyc) : 0u;
@@ -415,8 +414,9 @@ void printTable()
 				continue;
 			}
 		}
-		// Measured overhead = formula model + per-step residual (clamped to 0)
-		int64_t model = 1500LL + 1000000LL / (int64_t)configs[i].frequency;
+		// Worker calibration runs must start without an installed table.
+		// Logical boundaries still include Sming/application dispatch latency.
+		int64_t model = 0;
 		int64_t actual = model + r.latPerStep_us;
 		uint32_t overhead = (actual > 0) ? (uint32_t)actual : 0;
 		Serial.printf("    { %5lu, LEDC_TIMER_%u_BIT, %5lu }, // %s\n", (unsigned long)configs[i].frequency,
@@ -440,6 +440,8 @@ void printTable()
 
 void init()
 {
+	// A sweep must not reuse a table measured on the old dispatch path.
+	Esp32HardwarePwm::setCalibrationTable(nullptr, 0);
 	Serial.begin(SERIAL_BAUD_RATE);
 	Serial.systemDebugOutput(true);
 

@@ -27,17 +27,23 @@
 
 #include <SmingCore.h>
 #include <Esp32HardwarePwm.h>
+#include <esp_timer.h>
 
 namespace
 {
 // Pins — adjust to suit your board (avoid GPIO 6-11, 34-39 on ESP32 classic)
+#ifdef CONFIG_IDF_TARGET_ESP32C3
+// QuinLED An-Penta Mini: L1-L4; the auxiliary instance uses L5.
+std::vector<uint8_t> pinList{5, 4, 1, 0};
+#else
 std::vector<uint8_t> pinList{13, 12, 14, 27};
+#endif
 
 // clang-format off
 Esp32HardwarePwm pwm(pinList, Esp32HardwarePwm::Config{
 .timer = {
-.resolution = LEDC_TIMER_10_BIT,
-.frequency  = 4000,
+.resolution = LEDC_TIMER_12_BIT,
+.frequency  = 8000,
 },
 .phaseShift = {
 .mode = Esp32HardwarePwm::PhaseShiftMode::OFF,
@@ -62,6 +68,42 @@ constexpr uint8_t STREAM_QUEUE_DEPTH = 4;   ///< CH3 queue capacity (filled to b
 uint8_t ch1RearmCount = 0;		///< How many times CH1 has been re-armed
 uint8_t ch2WrapCount = 0;		///< How many times CH2 has wrapped
 uint32_t streamStepsPushed = 0; ///< Steps pushed to CH3 so far
+uint32_t completed[4]{};
+uint32_t emptied[4]{};
+bool queueError = false;
+Esp32HardwarePwm* auxiliary = nullptr;
+uint32_t auxiliaryDone = 0;
+uint32_t auxiliaryEmpty = 0;
+SimpleTimer finishTimer;
+int64_t demoStart;
+
+void checkFinished()
+{
+	for(uint8_t ch = 0; ch < 4; ++ch) {
+		if(pwm.isFadingChan(ch) || pwm.getQueueEntries(ch) || pwm.hasPendingCallbacks()) {
+			return;
+		}
+		if(auxiliary && (auxiliary->isFadingChan(0) || auxiliary->getQueueEntries(0) ||
+						 auxiliary->hasPendingCallbacks())) {
+			return;
+		}
+	}
+	finishTimer.stop();
+	// Wrap is reported when the last cyclic entry starts; resetting suppresses its completion.
+	const bool ok = completed[0] == 5 && completed[1] == 9 && completed[2] == 11 && completed[3] == 20 &&
+					ch1RearmCount == 3 && ch2WrapCount == 3 && !queueError &&
+					(!auxiliary || (auxiliaryDone == 3 && auxiliaryEmpty == 1));
+	for(uint8_t ch = 0; ch < pinList.size(); ++ch) {
+		pwm.setDutyChan(ch, 0);
+	}
+	if(auxiliary) {
+		auxiliary->setDutyChan(0, 0);
+	}
+	Serial.printf("ALL_TESTS_DONE,ok=%u,done=%u/%u/%u/%u,empty=%u/%u/%u/%u,outputs=off\n",
+				  unsigned(ok), unsigned(completed[0]), unsigned(completed[1]), unsigned(completed[2]),
+				  unsigned(completed[3]), unsigned(emptied[0]), unsigned(emptied[1]), unsigned(emptied[2]),
+				  unsigned(emptied[3]));
+}
 
 // -----------------------------------------------------------------------
 // CH1 helper: load 3 FIFO steps (0% -> 50% -> 100%)
@@ -96,6 +138,35 @@ void startDemo()
 	}
 
 	Serial.println(_F("\n=== Callbacks_HwPWM demo starting ==="));
+	demoStart = esp_timer_get_time();
+	pwm.setOnQueueErrorCallback([](uint8_t ch, Esp32HardwarePwm::QueueError error) {
+		queueError = true;
+		Serial.printf("QUEUE_ERROR,%u,%u\n", unsigned(ch), unsigned(error));
+	});
+#ifdef CONFIG_IDF_TARGET_ESP32C3
+	std::vector<uint8_t> auxiliaryPins{3};
+	Esp32HardwarePwm::Config auxiliaryConfig;
+	auxiliaryConfig.channelStart = LEDC_CHANNEL_5;
+	auxiliaryConfig.timer.timer_num = LEDC_TIMER_1;
+	auxiliaryConfig.timer.frequency = 8000;
+	auxiliaryConfig.timer.resolution = LEDC_TIMER_12_BIT;
+	auxiliary = new Esp32HardwarePwm(auxiliaryPins, auxiliaryConfig);
+	if(!auxiliary->isInitialized()) {
+		Serial.println("FATAL,auxiliary initialization failed");
+		return;
+	}
+	auxiliary->setOnFadeDoneCallback([](uint8_t) {
+		++auxiliaryDone;
+		Serial.printf("AUX_DONE,%u,%lld\n", unsigned(auxiliaryDone), esp_timer_get_time() - demoStart);
+	});
+	auxiliary->setOnQueueEmptyCallback([](uint8_t) { ++auxiliaryEmpty; });
+	auxiliary->setOnQueueErrorCallback([](uint8_t, Esp32HardwarePwm::QueueError) { queueError = true; });
+	auxiliary->setQueueCapacity(0, 16);
+	auxiliary->fadeChan(0, 0, 750, true);
+	auxiliary->fadeChan(0, auxiliary->getMaxDuty(), 500, true);
+	auxiliary->fadeChan(0, 0, 500, true);
+#endif
+	finishTimer.initializeMs<100>(checkFinished).start();
 	Serial.printf("  CH%u -> onFadeDone   (fires after every step)\n", CH_FADE_DONE);
 	Serial.printf("  CH%u -> onQueueEmpty (fires when FIFO drains)\n", CH_QUEUE_EMPTY);
 	Serial.printf("  CH%u -> onCyclicWrap (fires on each loop cycle)\n", CH_CYCLIC_WRAP);
@@ -107,6 +178,8 @@ void startDemo()
 	// We only print for CH0 here to keep output readable.
 	// -------------------------------------------------------------------
 	pwm.setOnFadeDoneCallback([](uint8_t ch) {
+		++completed[ch];
+		Serial.printf("DONE,%u,%u,%lld\n", unsigned(ch), unsigned(completed[ch]), esp_timer_get_time() - demoStart);
 		if(ch == CH_FADE_DONE) {
 			Serial.printf("[onFadeDone  ] ch=%u  duty=%lu/%lu\n", ch, (unsigned long)pwm.getDutyChan(ch),
 						  (unsigned long)pwm.getMaxDuty());
@@ -121,6 +194,8 @@ void startDemo()
 	// Re-arm CH1 up to (MAX_LOOPS-1) more times, then leave it idle.
 	// -------------------------------------------------------------------
 	pwm.setOnQueueEmptyCallback([](uint8_t ch) {
+		++emptied[ch];
+		Serial.printf("EMPTY,%u,%u,%lld\n", unsigned(ch), unsigned(emptied[ch]), esp_timer_get_time() - demoStart);
 		if(ch != CH_QUEUE_EMPTY)
 			return;
 		++ch1RearmCount;
@@ -138,6 +213,7 @@ void startDemo()
 	// Stop CH2 after MAX_LOOPS wraps.
 	// -------------------------------------------------------------------
 	pwm.setOnCyclicWrapCallback([](uint8_t ch) {
+		Serial.printf("WRAP,%u,%u,%lld\n", unsigned(ch), unsigned(completed[ch]), esp_timer_get_time() - demoStart);
 		if(ch != CH_CYCLIC_WRAP)
 			return;
 		++ch2WrapCount;
@@ -151,7 +227,7 @@ void startDemo()
 	// -------------------------------------------------------------------
 	// CH0 — onFadeDone: 5-step FIFO ramp up then down
 	// -------------------------------------------------------------------
-	pwm.setQueueCapacity(CH_FADE_DONE, 6);
+	pwm.setQueueCapacity(CH_FADE_DONE, 20);
 	pwm.setQueueAutoStart(CH_FADE_DONE, true);
 	pwm.fadePercentChan(CH_FADE_DONE, 0.0f, STEP_MS, false, true);
 	pwm.fadePercentChan(CH_FADE_DONE, 25.0f, STEP_MS, false, true);
@@ -162,14 +238,14 @@ void startDemo()
 	// -------------------------------------------------------------------
 	// CH1 — onQueueEmpty: initial 3-step FIFO load
 	// -------------------------------------------------------------------
-	pwm.setQueueCapacity(CH_QUEUE_EMPTY, 4);
+	pwm.setQueueCapacity(CH_QUEUE_EMPTY, 20);
 	pwm.setQueueAutoStart(CH_QUEUE_EMPTY, true);
 	armCh1Fifo();
 
 	// -------------------------------------------------------------------
 	// CH2 — onCyclicWrap: 4-step heartbeat in CYCLIC mode
 	// -------------------------------------------------------------------
-	pwm.setQueueCapacity(CH_CYCLIC_WRAP, 5);
+	pwm.setQueueCapacity(CH_CYCLIC_WRAP, 24);
 	pwm.setQueueMode(CH_CYCLIC_WRAP, Esp32HardwarePwm::QueueMode::CYCLIC);
 	pwm.fadePercentChan(CH_CYCLIC_WRAP, 0.0f, STEP_MS, false, true);
 	pwm.fadePercentChan(CH_CYCLIC_WRAP, 100.0f, STEP_MS, false, true);
@@ -193,7 +269,15 @@ void startDemo()
 
 void init()
 {
+#ifdef UART_ID_SERIAL_USB_JTAG
+	Serial.setPort(UART_ID_SERIAL_USB_JTAG);
+#endif
 	Serial.begin(SERIAL_BAUD_RATE);
-	Serial.systemDebugOutput(true);
+	Serial.systemDebugOutput(false);
+	Serial.printf("Callbacks_HwPWM,8000Hz,12bit,pins=%u", unsigned(pinList.size()));
+	for(auto pin : pinList) {
+		Serial.printf("/%u", unsigned(pin));
+	}
+	Serial.println();
 	startDemo();
 }

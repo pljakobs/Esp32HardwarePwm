@@ -2,8 +2,15 @@ Fade timing diagnostic
 =====================
 
 No-network ESP32-C3 timing probe for issue #36. The default GPIOs
-(4, 1, 3, 5, 0) match the QuinLED An-Penta Mini test board; change ``pins``
+(5, 4, 1, 0, 3) follow catalog L1 through L5 on the QuinLED An-Penta Mini; change ``pins``
 before using another board. Outputs ramp to full duty during the tests.
+
+On the experimental worker branch, split segments reload on the shared
+FreeRTOS worker, but logical fade completion and the next logical fade still
+wait for Sming. Zero-range holds use independent worker deadlines. The default
+reload correction is zero; the previous 1500us estimate and measurements below
+predate this architecture and are not worker calibration. Worker measurements
+are recorded separately below.
 
 Build with ``make SMING_ARCH=Esp32 SMING_SOC=esp32c3``; add
 ``SMING_RELEASE=1`` for a release build. Flash using the normal Sming tools.
@@ -16,6 +23,12 @@ Cases compare a single 3000 ms fade, six queued 500 ms fades, six externally
 chained fades polled every 20 ms, and 150 alternating full-range 20 ms fades.
 Additional cases cover 5-to-95%, downward and cyclic fades, disable reload compensation, or enable 15% spread spectrum
 with subsampling 4. Quantisation compensation remains enabled in all cases.
+``single-main-load`` blocks the Sming task for two seconds starting 300 ms
+into the fade, alternating 1 ms CPU work and one FreeRTOS tick of sleep.
+``LOAD`` reports the actual blocked interval; intermediate ``TRACE,0``
+records inside it demonstrate worker-independent segment continuation.
+The cyclic test explicitly marks completion after its reentrant reset:
+reset invalidates the dispatch generation and suppresses queue-empty delivery.
 
 Records are buffered in RAM and printed only after a run. ``TRACE`` columns
 are event, channel, microseconds since run start, target duty, and the duration
@@ -61,16 +74,61 @@ exact implementation on the host without Sming or IDF:
 
 ::
 
-    g++ -std=c++17 -Wall -Wextra -Werror -pedantic test_cycle_selection.cpp -o /tmp/test-cycle-selection
-    /tmp/test-cycle-selection
+    g++ -std=c++17 -Wall -Wextra -Werror -pedantic test_cycle_selection.cpp -o test-cycle-selection
+    ./test-cycle-selection
+    rm test-cycle-selection
 
 Tests compare against every legal cycle count for 1152 input combinations,
 exercise signed carry over 10000 steps, and check saturation, tie breaking,
 overhead subtraction and large durations. The firmware rounds residual time
 to microseconds; the Python experiment uses exact rational arithmetic.
+For production-source worker/state-machine tests, run
+``make -C ../../tests/native test``.
 
-Measured results
-----------------
+Worker hardware results (2026-11-10)
+-----------------------------------
+
+ESP32-C3 QuinLED An-Penta Mini, release, 8 kHz/12-bit, catalog channel
+order, zero reload correction, three repetitions per case. All 36 runs
+completed without API/queue failures or trace overflow. End duties matched
+their targets; no panic or watchdog was observed.
+
+===========================  ==========================
+3000 ms nominal              Observed END range (us)
+===========================  ==========================
+Single full range            2970115--2970472
+Six queued 500 ms chunks     2987079--2987689
+Six external 500 ms chunks   3120901--3120978
+150 queued 20 ms chunks      3113010--3113135
+5-to-95%                     2995938--2996225
+Full downward                2970175--2970451
+Six cyclic 500 ms chunks     2985049--2985499
+Single under main-task load  2970123--2970694
+Single, spread spectrum      2871370--3175052
+External, spread spectrum    2960956--3040999
+===========================  ==========================
+
+Default/explicit-zero cases are equivalent: the explicit-zero single case
+was 2970188--2970488 us, and its 20 ms sequence was 3112993--3113013 us.
+The approximately 30 ms short single fade and 113 ms long microfade chain
+remain timing limitations, not lost callbacks. Spread spectrum is not a
+strict wall-clock timing mode.
+
+With the Sming task blocked from approximately 301 ms to 2301--2308 ms,
+CH0 restarted split segments near 615, 1229 and 1844 ms in every run.
+Across the unloaded single-fade cases, 60 intermediate ISR-to-start-call
+gaps measured 19--49 us. This excludes the IDF call's execution time and
+hardware timer-edge alignment; it is not a calibrated overhead setting.
+``END`` includes callback dispatch, not physical output timing.
+
+The callback sample separately validated FIFO rearm, streaming refill,
+CYCLIC reset, zero-range holds and two instances. Hardware startup exposed
+an early ``esp_timer_create`` invalid-state failure for global objects;
+the worker now retries after timer-service startup. Teardown now records
+successful timer configuration even without a frequency setter.
+
+Earlier dispatcher results
+--------------------------
 
 ESP32-C3, 8 kHz/12-bit, five configured outputs, three runs per case in
 debug and release builds, with networking and spread spectrum off:
