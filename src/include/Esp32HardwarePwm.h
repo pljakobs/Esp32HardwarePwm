@@ -366,6 +366,17 @@ public:
 	 */
 	bool fadeChan(uint8_t channel_idx, uint32_t target_duty, uint32_t fade_time_ms, bool queue = false);
 
+	/** @brief Fade to a target while limiting generated hardware microfades.
+	 * @param channel_idx Channel index
+	 * @param target_duty Target duty value
+	 * @param fade_time_ms Total requested command duration
+	 * @param max_cycles Maximum PWM cycles allowed per duty-count change
+	 * @param queue If false, replaces any current fade; if true, enqueues the command
+	 * @return true if started/enqueued successfully
+	 */
+	bool fadeChanWithCycleLimit(uint8_t channel_idx, uint32_t target_duty, uint32_t fade_time_ms,
+								uint32_t max_cycles, bool queue = false);
+
 	/** @brief Hardware linear fade on a channel (percentage target).
 	 * @param channel_idx Channel index
 	 * @param target_pct Target duty as percentage (0.0–100.0)
@@ -610,12 +621,13 @@ private:
 	};
 	std::vector<ChannelState> states_;
 	/** @brief Internal: enqueue a fade (absolute duty). Used by fadeChan(). */
-	bool queueDutyChan(uint8_t channel, uint32_t targetDuty, uint32_t fadeTimeMs);
+	bool queueDutyChan(uint8_t channel, uint32_t targetDuty, uint32_t fadeTimeMs, uint32_t maxCycles = 0);
 
 	struct FadeEntry {
 		uint32_t targetDuty;
 		uint32_t fadeTimeMs;
 		bool isPartial = false; ///< True for intermediate segments of a split long-range fade
+		uint32_t maxCycles = 0;
 	};
 
 	struct ChannelFadeQueue {
@@ -630,6 +642,13 @@ private:
 		int32_t carryUs = 0;			   ///< Sub-ms accumulator for reload overhead correction
 		int64_t quantCarryUs = 0;		   ///< Signed requested-minus-selected hardware time, in microseconds
 		bool activeIsIntermediate = false; ///< True when the executing entry is a partial (intermediate) split segment
+		bool workerFadeActive = false;
+		uint32_t workerStartDuty = 0;
+		uint32_t workerTargetDuty = 0;
+		uint32_t workerDurationMs = 0;
+		uint32_t workerMaxCycles = 0;
+		int64_t workerStartUs = 0;
+		int64_t workerHoldUntilUs = 0;
 	};
 
 	struct PinConfig {
@@ -730,6 +749,7 @@ private:
 
 	// Start the next fade from the queue; returns false if queue empty
 	bool startNextFade(uint8_t channel_idx);
+	bool startWorkerFadeSegment(uint8_t channel_idx);
 
 	// Cancel any in-flight or queued fade on a channel (hardware fade, steady hold, pending callback)
 	void abortFadeChan(uint8_t channel_idx);

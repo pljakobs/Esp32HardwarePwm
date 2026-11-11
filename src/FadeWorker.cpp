@@ -348,12 +348,21 @@ void FadeWorker::service()
 			if(state.deadlineUs != 0 && state.deadlineUs <= now) {
 				done = true;
 			}
+			auto& queue = self->fadeQueues_[i];
+			if(done && !self->fadeDone_[i] && queue.workerHoldUntilUs > now) {
+				state.deadlineUs = queue.workerHoldUntilUs;
+				queue.workerHoldUntilUs = 0;
+				done = false;
+			}
 			if(done && !self->fadeDone_[i]) {
 				state.deadlineUs = 0;
 				self->pins_[i].currentDuty = self->pins_[i].targetDuty;
 				self->fadeDone_[i] = true;
+				if(queue.workerFadeActive && !queue.activeIsIntermediate) {
+					queue.workerFadeActive = false;
+				}
 				if(state.notifyCompletion) {
-					if(self->fadeQueues_[i].activeIsIntermediate) {
+					if(queue.activeIsIntermediate) {
 						self->startNextFade(i);
 					} else if(self->onFadeDone_) {
 						state.awaitingDispatch = true;

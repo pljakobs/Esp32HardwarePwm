@@ -47,6 +47,55 @@ int main()
 		assert(Mock::callbacks.empty() && !pwm.isFadingChan(0));
 		assert(!pwm.hasPendingCallbacks());
 
+		// Cycle-limited commands are retained as one intake entry and expanded
+		// by the worker. A one-count slow fade is timed with a worker-owned hold.
+		assert(pwm.setFrequency(16000));
+		pwm.setDutyChan(0, 0);
+		Mock::now = 100;
+		int limitedDone = 0;
+		pwm.setOnFadeDoneCallback([&](uint8_t) { unlocked(); ++limitedDone; });
+		const auto limitedStarts = Mock::starts;
+		assert(pwm.fadeChanWithCycleLimit(0, 1, 1000, 1023));
+		assert(pwm.getQueueEntries(0) == 0 && pwm.isFadingChan(0));
+		Mock::now += 500000;
+		poll();
+		assert(Mock::starts == limitedStarts + 1 && Mock::target[0][0] == 1);
+		Mock::now += 63000;
+		Mock::complete(0, 0);
+		poll();
+		assert(pwm.isFadingChan(0) && Mock::callbacks.empty());
+		Mock::now += 437000;
+		poll();
+		drain();
+		assert(limitedDone == 1 && !pwm.isFadingChan(0));
+
+		assert(pwm.setFrequency(8000));
+		pwm.setDutyChan(0, 0);
+		const auto distributedStarts = Mock::starts;
+		assert(pwm.fadeChanWithCycleLimit(0, 4095, 2000, 1023));
+		assert(pwm.getQueueEntries(0) == 0 && Mock::target[0][0] == 1023);
+		for(uint32_t expectedTarget : {2047U, 3071U, 4095U}) {
+			Mock::now += 500000;
+			Mock::complete(0, 0);
+			poll();
+			assert(Mock::target[0][0] == expectedTarget);
+		}
+		Mock::now += 500000;
+		Mock::complete(0, 0);
+		poll();
+		drain();
+		assert(Mock::starts == distributedStarts + 4 && limitedDone == 2);
+
+		pwm.setDutyChan(0, 0);
+		assert(pwm.fadeChanWithCycleLimit(0, 4095, 2000, 1023));
+		pwm.resetQueue(0);
+		assert(pwm.isFadingChan(0));
+		Mock::now += 500000;
+		Mock::complete(0, 0);
+		poll();
+		assert(!pwm.isFadingChan(0) && Mock::callbacks.empty() && limitedDone == 2);
+		pwm.setOnFadeDoneCallback({});
+
 		int emptyOnly = 0;
 		pwm.setOnQueueEmptyCallback([&](uint8_t) { unlocked(); ++emptyOnly; });
 		assert(pwm.fadeChan(0, 300, 10));

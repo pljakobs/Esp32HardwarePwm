@@ -10,8 +10,10 @@
  *
  * FadeWorker owns one lazily-created FreeRTOS task and one ESP timer. The task
  * services LEDC fade-completion signals, advances timed fade segments, applies
- * spread-spectrum updates, and schedules the next deadline. It is shared
- * across registered PWM instances rather than creating a task per instance.
+ * spread-spectrum updates, and schedules the next deadline. Cycle-limited
+ * top-level fades are expanded incrementally into bounded microfades here,
+ * without storing those microfades in the per-channel intake queue. It is
+ * shared across registered PWM instances rather than creating a task per instance.
  *
  * @par Threading and callbacks
  * The recursive mutex protects the instance registry, fade state, and

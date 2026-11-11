@@ -580,6 +580,19 @@ bool Esp32HardwarePwm::fadeChan(uint8_t channel_idx, uint32_t target_duty, uint3
 	return queueDutyChan(channel_idx, target_duty, fade_time_ms);
 }
 
+bool Esp32HardwarePwm::fadeChanWithCycleLimit(uint8_t channel_idx, uint32_t target_duty, uint32_t fade_time_ms,
+											 uint32_t max_cycles, bool queue)
+{
+	Guard guard;
+	if(!initialized_ || !fadeEnabled_ || channel_idx >= pins_.size() || max_cycles == 0) {
+		return false;
+	}
+	if(!queue) {
+		abortFadeChan(channel_idx);
+	}
+	return queueDutyChan(channel_idx, target_duty, fade_time_ms, max_cycles);
+}
+
 void Esp32HardwarePwm::abortFadeChan(uint8_t channel_idx)
 {
 	bool wasFading = !fadeDone_[channel_idx];
@@ -836,6 +849,9 @@ bool Esp32HardwarePwm::startNextFade(uint8_t channel_idx)
 	}
 
 	ChannelFadeQueue& q = fadeQueues_[channel_idx];
+	if(q.workerFadeActive) {
+		return startWorkerFadeSegment(channel_idx);
+	}
 
 	// Zero-range guard: if target == current duty, LEDC cannot execute a hardware fade.
 	// Holds use a worker-owned deadline, never a Sming event-loop timer.
@@ -867,6 +883,16 @@ bool Esp32HardwarePwm::startNextFade(uint8_t channel_idx)
 		FadeEntry entry = dequeueFifo(q);
 		states_[channel_idx].notifyCompletion = true;
 		q.activeIsIntermediate = entry.isPartial;
+		if(entry.maxCycles != 0 && entry.fadeTimeMs != 0) {
+			q.workerFadeActive = true;
+			q.workerStartDuty = pins_[channel_idx].currentDuty;
+			q.workerTargetDuty = entry.targetDuty;
+			q.workerDurationMs = entry.fadeTimeMs;
+			q.workerMaxCycles = entry.maxCycles;
+			q.workerStartUs = esp_timer_get_time();
+			q.workerHoldUntilUs = 0;
+			return startWorkerFadeSegment(channel_idx);
+		}
 		if(handleZeroRangeFade(entry)) {
 			return true;
 		}
@@ -885,10 +911,67 @@ bool Esp32HardwarePwm::startNextFade(uint8_t channel_idx)
 		notify(channel_idx, FadeWorker::Wrap);
 	}
 	q.head = nextHead;
+	if(entry.maxCycles != 0 && entry.fadeTimeMs != 0) {
+		q.workerFadeActive = true;
+		q.workerStartDuty = pins_[channel_idx].currentDuty;
+		q.workerTargetDuty = entry.targetDuty;
+		q.workerDurationMs = entry.fadeTimeMs;
+		q.workerMaxCycles = entry.maxCycles;
+		q.workerStartUs = esp_timer_get_time();
+		q.workerHoldUntilUs = 0;
+		return startWorkerFadeSegment(channel_idx);
+	}
 	if(handleZeroRangeFade(entry)) {
 		return true;
 	}
 	return fadeHwChan(channel_idx, entry.targetDuty, entry.fadeTimeMs);
+}
+
+bool Esp32HardwarePwm::startWorkerFadeSegment(uint8_t channel_idx)
+{
+	if(channel_idx >= pins_.size()) {
+		return false;
+	}
+
+	auto& q = fadeQueues_[channel_idx];
+	auto& state = states_[channel_idx];
+	const int64_t now = esp_timer_get_time();
+	const uint32_t elapsedMs = static_cast<uint32_t>(
+		std::min<int64_t>(q.workerDurationMs - 1, std::max<int64_t>(0, now - q.workerStartUs) / 1000));
+	const uint32_t intervalMs = std::min<uint32_t>(500, q.workerDurationMs - elapsedMs);
+	const uint32_t segmentEndMs = elapsedMs + intervalMs;
+	const int64_t segmentEndUs = q.workerStartUs + int64_t(segmentEndMs) * 1000;
+	const int64_t range = int64_t(q.workerTargetDuty) - q.workerStartDuty;
+	const uint32_t targetDuty = static_cast<uint32_t>(
+		int64_t(q.workerStartDuty) + range * segmentEndMs / q.workerDurationMs);
+	const uint32_t currentDuty = pins_[channel_idx].currentDuty;
+	const uint32_t dutyRange = targetDuty >= currentDuty ? targetDuty - currentDuty : currentDuty - targetDuty;
+
+	state.notifyCompletion = true;
+	q.activeIsIntermediate = segmentEndMs < q.workerDurationMs;
+	q.workerHoldUntilUs = 0;
+
+	if(dutyRange == 0) {
+		fadeDone_[channel_idx] = false;
+		state.deadlineUs = std::max<int64_t>(1, segmentEndUs);
+		FadeWorker::wake();
+		return true;
+	}
+
+	const uint32_t frequency = getFrequency();
+	if(frequency == 0) {
+		q.workerFadeActive = false;
+		state.notifyCompletion = false;
+		debug_e("startWorkerFadeSegment: PWM frequency is zero");
+		return false;
+	}
+	const uint64_t safeDurationMs = uint64_t(q.workerMaxCycles) * dutyRange * 1000 / frequency;
+	const uint32_t fadeTimeMs = static_cast<uint32_t>(
+		std::max<uint64_t>(1, std::min<uint64_t>(intervalMs, safeDurationMs)));
+	if(fadeTimeMs < intervalMs) {
+		q.workerHoldUntilUs = segmentEndUs;
+	}
+	return fadeHwChan(channel_idx, targetDuty, fadeTimeMs);
 }
 
 void Esp32HardwarePwm::setQueueMode(uint8_t channel, QueueMode mode)
@@ -1021,7 +1104,7 @@ uint32_t Esp32HardwarePwm::getReloadOverheadUs(uint8_t channel) const
 	return fadeQueues_[channel].reloadOverheadUs;
 }
 
-bool Esp32HardwarePwm::queueDutyChan(uint8_t channel, uint32_t targetDuty, uint32_t fadeTimeMs)
+bool Esp32HardwarePwm::queueDutyChan(uint8_t channel, uint32_t targetDuty, uint32_t fadeTimeMs, uint32_t maxCycles)
 {
 	if(!initialized_ || !fadeEnabled_ || channel >= pins_.size()) {
 		debug_e("queueDutyChan: not initialized, fade not installed, or channel %d out of range", channel);
@@ -1048,7 +1131,7 @@ bool Esp32HardwarePwm::queueDutyChan(uint8_t channel, uint32_t targetDuty, uint3
 	// Fast fades must remain unsplit so IDF can select a duty scale greater than one.
 	uint64_t cycle_num = (rangeAbs > 0) ? ((uint64_t)timer_.frequency * fadeTimeMs) / (1000ULL * rangeAbs) : 0;
 
-	bool shouldSplit = (rangeAbs > 1023) && (cycle_num >= 1);
+	bool shouldSplit = maxCycles == 0 && (rangeAbs > 1023) && (cycle_num >= 1);
 	uint16_t nSegs = shouldSplit ? (uint16_t)((rangeAbs + 1022) / 1023) : 1;
 
 	// If the split segments don't all fit, degrade gracefully to a single unsplit
@@ -1084,7 +1167,8 @@ bool Esp32HardwarePwm::queueDutyChan(uint8_t channel, uint32_t targetDuty, uint3
 		if(segTimeMs == 0 && fadeTimeMs != 0) {
 			segTimeMs = 1;
 		}
-		q.entries[q.tail] = {segEnd, segTimeMs, /*isPartial=*/(s < nSegs - 1)};
+		q.entries[q.tail] = {segEnd, segTimeMs, /*isPartial=*/(s < nSegs - 1),
+							 (maxCycles != 0 && s == 0) ? maxCycles : 0};
 		q.tail = (q.tail + 1) % (uint16_t)q.entries.size();
 	}
 

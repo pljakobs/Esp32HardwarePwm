@@ -335,6 +335,9 @@ void disableFade();   // cancel this instance's fades; leaves the shared service
 
 // Immediate fade (resets queue, starts now); queue=true enqueues instead
 bool fadeChan(uint8_t channel, uint32_t target_duty, uint32_t fade_time_ms, bool queue = false);
+// Worker-generated microfades bounded by max_cycles and 500 ms
+bool fadeChanWithCycleLimit(uint8_t channel, uint32_t target_duty, uint32_t fade_time_ms,
+                            uint32_t max_cycles, bool queue = false);
 // Same but target is a percentage (0.0 – 100.0); cie=true applies CIE 1931 correction
 bool fadePercentChan(uint8_t channel, float target_pct, uint32_t fade_time_ms, bool cie = false, bool queue = false);
 // Returns true while a hardware fade is in progress
@@ -343,9 +346,13 @@ bool isFadingChan(uint8_t channel) const;
 
 #### Fade Queue
 
-Each channel has an independent fade queue that can chain multiple fades without
-application polling.  The queue depth defaults to `FADE_QUEUE_DEPTH` (10) and can
-be changed per-channel at runtime before the queue is filled.
+Each channel has an independent fade-command queue that can chain multiple fades
+without application polling. The cycle-limited API stores each top-level command
+as one queue entry; FadeWorker generates its duty-interpolated microfades
+incrementally, each no longer than 500 ms. When a hardware-safe fade step must
+finish early, the worker holds its target until the segment boundary before
+continuing the command. The queue depth defaults to `FADE_QUEUE_DEPTH` (10) and
+can be changed per-channel at runtime before the queue is filled.
 
 ##### Modes
 
