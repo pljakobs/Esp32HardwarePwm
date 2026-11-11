@@ -35,9 +35,37 @@ int main()
 		Mock::timerCreateError = ESP_OK;
 		poll();
 		assert(Mock::timers == 1);
+		assert(pwm.fadeChan(0, 100, 10));
+		assert(pwm.fadeChan(0, 200, 10, true));
+		const auto noCallbackStarts = Mock::starts;
+		Mock::complete(0, 0);
+		poll();
+		assert(Mock::callbacks.empty() && Mock::starts == noCallbackStarts + 1);
+		assert(pwm.isFadingChan(0));
+		Mock::complete(0, 0);
+		poll();
+		assert(Mock::callbacks.empty() && !pwm.isFadingChan(0));
+		assert(!pwm.hasPendingCallbacks());
+
+		int emptyOnly = 0;
+		pwm.setOnQueueEmptyCallback([&](uint8_t) { unlocked(); ++emptyOnly; });
+		assert(pwm.fadeChan(0, 300, 10));
+		assert(pwm.fadeChan(0, 400, 10, true));
+		const auto emptyOnlyStarts = Mock::starts;
+		Mock::complete(0, 0);
+		poll();
+		assert(Mock::callbacks.empty() && Mock::starts == emptyOnlyStarts + 1);
+		Mock::complete(0, 0);
+		poll();
+		assert(!Mock::callbacks.empty());
+		drain();
+		assert(emptyOnly == 1);
+
 		int done = 0, empty = 0;
+		pwm.setOnQueueEmptyCallback({});
 		pwm.setOnFadeDoneCallback([&](uint8_t) { unlocked(); ++done; assert(pwm.hasPendingCallbacks()); });
 		pwm.setOnQueueEmptyCallback([&](uint8_t) { unlocked(); ++empty; assert(pwm.hasPendingCallbacks()); });
+		pwm.setDutyChan(0, 0);
 		// Exercise the real ISR callback concurrently with task-side signal
 		// snapshots. The native portMUX mock is an actual cross-thread mutex.
 		auto signalIrq = Mock::irq[0][0];

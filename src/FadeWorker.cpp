@@ -22,22 +22,46 @@ DRAM_ATTR FadeWorker::Signal FadeWorker::signals_[2][SOC_LEDC_CHANNEL_NUM];
 DRAM_ATTR TaskHandle_t FadeWorker::task_ = nullptr;
 esp_timer_handle_t FadeWorker::timer_ = nullptr;
 
+/**
+ * @brief Acquire the worker's recursive task-context mutex.
+ *
+ * @note Must not be called from an ISR.
+ */
 void FadeWorker::lock()
 {
 	assert(mutex_ != nullptr);
 	xSemaphoreTakeRecursive(mutex_, portMAX_DELAY);
 }
 
+/**
+ * @brief Release the worker's recursive task-context mutex.
+ *
+ * @note Must only be called by a task that holds the mutex.
+ */
 void FadeWorker::unlock()
 {
 	xSemaphoreGiveRecursive(mutex_);
 }
 
+/**
+ * @brief Return the ISR-shared completion signal for an LEDC channel.
+ * @param speedMode LEDC speed mode indexing the signal table.
+ * @param channel LEDC channel indexing the signal table.
+ * @return Reference to the channel's static signal storage.
+ */
 FadeWorker::Signal& FadeWorker::signal(int speedMode, uint8_t channel)
 {
 	return signals_[speedMode][channel];
 }
 
+/**
+ * @brief Clear a channel signal and associate it with a new fade index.
+ * @param speedMode LEDC speed mode.
+ * @param channel LEDC channel.
+ * @param index Index recorded for the next ISR completion.
+ *
+ * The critical section synchronizes this update with the LEDC ISR callback.
+ */
 void FadeWorker::resetSignal(int speedMode, uint8_t channel, uint32_t index)
 {
 	portENTER_CRITICAL_SAFE(&signalMux_);
@@ -48,6 +72,11 @@ void FadeWorker::resetSignal(int speedMode, uint8_t channel, uint32_t index)
 	portEXIT_CRITICAL_SAFE(&signalMux_);
 }
 
+/**
+ * @brief Clear the pending flag for a channel signal.
+ * @param speedMode LEDC speed mode.
+ * @param channel LEDC channel.
+ */
 void FadeWorker::clearSignal(int speedMode, uint8_t channel)
 {
 	portENTER_CRITICAL_SAFE(&signalMux_);
@@ -55,6 +84,12 @@ void FadeWorker::clearSignal(int speedMode, uint8_t channel)
 	portEXIT_CRITICAL_SAFE(&signalMux_);
 }
 
+/**
+ * @brief Atomically read and consume a channel completion signal.
+ * @param speedMode LEDC speed mode.
+ * @param channel LEDC channel.
+ * @return Snapshot of the signal, with its pending flag cleared.
+ */
 FadeWorker::SignalSnapshot FadeWorker::takeSignal(int speedMode, uint8_t channel)
 {
 	portENTER_CRITICAL_SAFE(&signalMux_);
@@ -65,6 +100,12 @@ FadeWorker::SignalSnapshot FadeWorker::takeSignal(int speedMode, uint8_t channel
 	return snapshot;
 }
 
+/**
+ * @brief Check whether an ISR completion signal is pending.
+ * @param speedMode LEDC speed mode.
+ * @param channel LEDC channel.
+ * @return @c true if the signal is pending; otherwise @c false.
+ */
 bool FadeWorker::hasPendingSignal(int speedMode, uint8_t channel)
 {
 	portENTER_CRITICAL_SAFE(&signalMux_);
@@ -73,6 +114,10 @@ bool FadeWorker::hasPendingSignal(int speedMode, uint8_t channel)
 	return pending;
 }
 
+/**
+ * @brief Read the worker task handle safely against ISR access.
+ * @return Current task handle, or @c nullptr before worker creation.
+ */
 TaskHandle_t FadeWorker::taskHandle()
 {
 	portENTER_CRITICAL_SAFE(&signalMux_);
@@ -81,6 +126,10 @@ TaskHandle_t FadeWorker::taskHandle()
 	return task;
 }
 
+/**
+ * @brief Create the one-shot timer used to wake the worker at deadlines.
+ * @return ESP-IDF timer creation result.
+ */
 esp_err_t FadeWorker::createTimer()
 {
 	esp_timer_create_args_t args = {};
@@ -90,6 +139,14 @@ esp_err_t FadeWorker::createTimer()
 	return esp_timer_create(&args, &timer_);
 }
 
+/**
+ * @brief Lazily create the shared timer and FreeRTOS worker task.
+ * @return @c true if the worker exists or was created successfully.
+ *
+ * Timer initialization may not yet be available during global object
+ * construction; in that case, the worker task retries timer creation while
+ * servicing.
+ */
 bool FadeWorker::ensure()
 {
 	if(taskHandle()) {
@@ -116,23 +173,43 @@ bool FadeWorker::ensure()
 	return true;
 }
 
+/**
+ * @brief Allocate a monotonically increasing PWM instance identifier.
+ * @return The newly allocated identifier.
+ */
 uint32_t FadeWorker::allocateInstanceId()
 {
 	return ++nextInstanceId_;
 }
 
+/**
+ * @brief Add an initialized PWM instance to the worker registry.
+ * @param instance PWM instance to register; the caller holds the worker mutex.
+ *
+ * Wakes the worker so it can observe the newly registered instance.
+ */
 void FadeWorker::registerInstance(Esp32HardwarePwm* instance)
 {
 	instances_.push_back(instance);
 	wake();
 }
 
+/**
+ * @brief Remove a PWM instance and its deferred notifications.
+ * @param instance PWM instance to unregister; the caller holds the worker mutex.
+ */
 void FadeWorker::unregisterInstance(Esp32HardwarePwm* instance)
 {
 	instances_.erase(std::remove(instances_.begin(), instances_.end(), instance), instances_.end());
 	clearNotifications(instance->instanceId_);
 }
 
+/**
+ * @brief Check whether an LEDC channel is owned by a registered PWM instance.
+ * @param speedMode LEDC speed mode.
+ * @param channel LEDC channel.
+ * @return @c true if the channel is in use; otherwise @c false.
+ */
 bool FadeWorker::ownsChannel(ledc_mode_t speedMode, ledc_channel_t channel)
 {
 	for(const auto* instance : instances_) {
@@ -145,6 +222,13 @@ bool FadeWorker::ownsChannel(ledc_mode_t speedMode, ledc_channel_t channel)
 	return false;
 }
 
+/**
+ * @brief Check whether another registered instance uses an LEDC timer.
+ * @param except Instance excluded from the search.
+ * @param speedMode LEDC speed mode.
+ * @param timer LEDC timer number.
+ * @return @c true if another instance uses the timer; otherwise @c false.
+ */
 bool FadeWorker::timerInUse(const Esp32HardwarePwm* except, ledc_mode_t speedMode, ledc_timer_t timer)
 {
 	for(const auto* instance : instances_) {
@@ -155,6 +239,11 @@ bool FadeWorker::timerInUse(const Esp32HardwarePwm* except, ledc_mode_t speedMod
 	return false;
 }
 
+/**
+ * @brief Check whether deferred notifications remain for an instance.
+ * @param instance PWM instance identifier.
+ * @return @c true if a notification is queued; otherwise @c false.
+ */
 bool FadeWorker::hasNotifications(uint32_t instance)
 {
 	for(const auto& notification : notifications_) {
@@ -165,6 +254,11 @@ bool FadeWorker::hasNotifications(uint32_t instance)
 	return false;
 }
 
+/**
+ * @brief Remove queued notifications matching an instance and optional channel.
+ * @param instance PWM instance identifier.
+ * @param channel Channel to clear, or a negative value to clear all its channels.
+ */
 void FadeWorker::clearNotifications(uint32_t instance, int channel)
 {
 	notifications_.erase(std::remove_if(notifications_.begin(), notifications_.end(),
@@ -174,16 +268,30 @@ void FadeWorker::clearNotifications(uint32_t instance, int channel)
 						 notifications_.end());
 }
 
+/**
+ * @brief Return the number of registered PWM instances.
+ * @return Registered instance count.
+ */
 size_t FadeWorker::instanceCount()
 {
 	return instances_.size();
 }
 
+/**
+ * @brief Return the number of deferred notifications awaiting dispatch.
+ * @return Queued notification count.
+ */
 size_t FadeWorker::notificationCount()
 {
 	return notifications_.size();
 }
 
+/**
+ * @brief Wake the worker task if it has been created.
+ *
+ * Safe for use from task context; the LEDC ISR uses its dedicated FromISR
+ * notification path instead.
+ */
 void FadeWorker::wake()
 {
 	if(auto task = taskHandle()) {
@@ -191,12 +299,27 @@ void FadeWorker::wake()
 	}
 }
 
+/**
+ * @brief Append a deferred callback notification and wake the worker.
+ * @param instance PWM instance that owns the callback.
+ * @param channel PWM instance channel index.
+ * @param kind Notification kind (completion, wrap, or queue error).
+ *
+ * The caller must hold the worker mutex.
+ */
 void FadeWorker::notify(Esp32HardwarePwm* instance, uint8_t channel, uint8_t kind)
 {
 	notifications_.push_back({instance->instanceId_, instance->states_[channel].generation, channel, kind});
 	wake();
 }
 
+/**
+ * @brief Service fade signals and deadlines for all registered instances.
+ *
+ * Runs on the worker task with the worker mutex held. It advances fade
+ * segments, processes spread-spectrum deadlines, arms the next timer deadline,
+ * and queues deferred user notifications in Sming's callback queue.
+ */
 void FadeWorker::service()
 {
 	Guard guard;
@@ -232,9 +355,15 @@ void FadeWorker::service()
 				if(state.notifyCompletion) {
 					if(self->fadeQueues_[i].activeIsIntermediate) {
 						self->startNextFade(i);
-					} else {
+					} else if(self->onFadeDone_) {
 						state.awaitingDispatch = true;
 						notify(self, i, Complete);
+					} else {
+						const bool more = self->startNextFade(i);
+						if(!more && self->onQueueEmpty_) {
+							state.awaitingDispatch = true;
+							notify(self, i, Complete);
+						}
 					}
 				} else {
 					self->startNextFade(i);
@@ -254,6 +383,13 @@ void FadeWorker::service()
 	}
 }
 
+/**
+ * @brief FreeRTOS entry point for the shared PWM service task.
+ *
+ * Services pending work, then sleeps until notified or briefly retries when
+ * timer creation or callback-queue dispatch needs another attempt. The task
+ * argument is unused.
+ */
 void FadeWorker::workerTask(void*)
 {
 	for(;;) {
@@ -265,11 +401,24 @@ void FadeWorker::workerTask(void*)
 	}
 }
 
+/**
+ * @brief ESP timer callback that wakes the worker task.
+ *
+ * The timer argument is unused. This callback runs in the ESP timer task
+ * context, not in an ISR.
+ */
 void FadeWorker::wakeTimer(void*)
 {
 	wake();
 }
 
+/**
+ * @brief Dispatch one queued notification in Sming callback context.
+ *
+ * The worker mutex is released while invoking application callbacks. Instance
+ * identity and fade generation are checked before dispatch to discard stale
+ * notifications safely. The callback parameter is unused.
+ */
 void FadeWorker::dispatch(uint32_t)
 {
 	Guard guard;
