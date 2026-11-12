@@ -82,6 +82,11 @@ have dedicated regressions.
 The existing production cycle-selection tests are included.
 These mocks do not reproduce the IDF ISR/driver timing or FreeRTOS scheduler.
 
+`update()` latches only staged duty/phase writes. It does not re-trigger idle
+channels after a fade: LEDC retains the ramp configuration after completion,
+so an unconditional duty update can replay that ramp even when the cached
+target is zero. Native regressions cover this sequence and staged-write latching.
+
 ## Features
 
 - **Multiple PWM Instances**: Create multiple independent PWM instances with different configurations

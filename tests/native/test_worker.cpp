@@ -47,6 +47,48 @@ int main()
 		assert(Mock::callbacks.empty() && !pwm.isFadingChan(0));
 		assert(!pwm.hasPendingCallbacks());
 
+		// RGBWWLed keeps publishing the final duty and calling update() after a fade.
+		// LEDC retains the ramp registers, so an idle update must not restart it.
+		pwm.setDutyChan(0, 256);
+		assert(pwm.fadeChanWithCycleLimit(0, 0, 500, 1023));
+		Mock::now += 500000;
+		Mock::complete(0, 0);
+		poll();
+		assert(!pwm.isFadingChan(0) && pwm.getDutyChan(0) == 0);
+		const auto replays = Mock::fadeReplays;
+		for(int i = 0; i < 10; ++i) {
+			assert(pwm.setDutyChan(0, 0, false));
+			pwm.update();
+		}
+		assert(Mock::fadeReplays == replays);
+		auto updates = Mock::dutyUpdates;
+		assert(pwm.setDutyChan(0, 100, false));
+		assert(Mock::dutyUpdates == updates);
+		pwm.update();
+		assert(Mock::dutyUpdates == ++updates);
+		pwm.update();
+		assert(Mock::dutyUpdates == updates);
+		assert(pwm.setPhaseShiftChan(0, 50, false));
+		assert(Mock::dutyUpdates == updates);
+		pwm.update();
+		assert(Mock::dutyUpdates == ++updates);
+		assert(pwm.setDutyChan(0, 200, false));
+		assert(pwm.setDutyChan(0, 200, true));
+		assert(Mock::dutyUpdates == ++updates);
+		pwm.update();
+		assert(Mock::dutyUpdates == updates);
+
+		// Starting a ramp supersedes any duty write that was not yet latched.
+		assert(pwm.setDutyChan(0, 300, false));
+		assert(pwm.fadeChanWithCycleLimit(0, 0, 500, 1023));
+		pwm.update();
+		assert(Mock::dutyUpdates == updates);
+		Mock::now += 500000;
+		Mock::complete(0, 0);
+		poll();
+		pwm.update();
+		assert(Mock::fadeReplays == replays && Mock::dutyUpdates == updates);
+
 		// Cycle-limited commands are retained as one intake entry and expanded
 		// by the worker. A one-count slow fade is timed with a worker-owned hold.
 		assert(pwm.setFrequency(16000));

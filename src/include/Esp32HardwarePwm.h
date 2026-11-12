@@ -618,6 +618,7 @@ private:
 		bool notifyCompletion = false;
 		bool awaitingDispatch = false;
 		bool dispatching = false;
+		bool updatePending = false;
 	};
 	std::vector<ChannelState> states_;
 	/** @brief Internal: enqueue a fade (absolute duty). Used by fadeChan(). */

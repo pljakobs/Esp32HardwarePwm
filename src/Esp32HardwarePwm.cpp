@@ -367,19 +367,22 @@ uint8_t Esp32HardwarePwm::getResolution() const
 void Esp32HardwarePwm::update()
 {
 	Guard guard;
-	// todo: this does not do anything meaningful
 	if(!initialized_) {
 		debug_e("Cannot update: PWM not initialized");
 		return;
 	}
 
-	// Update all channels. Skip channels with a fade in flight: ledc_update_duty()
-	// re-asserts duty_start, which restarts the hardware fade from its start duty
-	// and prevents the fade-end interrupt from ever firing.
+	// Only latch staged writes. LEDC retains ramp registers after completion;
+	// reasserting duty_start without a new duty write can replay the old fade.
 	for(size_t i = 0; i < pins_.size(); ++i) {
 		const auto& pin = pins_[i];
-		if(pin.isActive && fadeDone_[i]) {
-			ledc_update_duty(timer_.speed_mode, pin.channel);
+		if(pin.isActive && fadeDone_[i] && states_[i].updatePending) {
+			const auto result = ledc_update_duty(timer_.speed_mode, pin.channel);
+			if(result != ESP_OK) {
+				debug_e("update: channel %u failed: %s", unsigned(i), esp_err_to_name(result));
+			} else {
+				states_[i].updatePending = false;
+			}
 		}
 	}
 }
@@ -421,7 +424,7 @@ bool Esp32HardwarePwm::setDutyChan(uint8_t channel, uint32_t duty, bool update_i
 		abortFadeChan(channel);
 	}
 
-	if(cfg.currentDuty == duty && !overridingFade) {
+	if(cfg.currentDuty == duty && !overridingFade && !(update_immediately && states_[channel].updatePending)) {
 		debug_d("Duty for channel %d already at %d, no update needed", channel, duty);
 		return true; // no change
 	}
@@ -433,13 +436,23 @@ bool Esp32HardwarePwm::setDutyChan(uint8_t channel, uint32_t duty, bool update_i
 	}
 
 	debug_i("Setting duty for pin %d channel %d: %d", cfg.gpioPin, cfg.channel, duty);
+	auto result = ledc_set_duty(timer_.speed_mode, cfg.channel, duty);
+	if(result != ESP_OK) {
+		debug_e("setDutyChan: channel %u failed: %s", channel, esp_err_to_name(result));
+		return false;
+	}
 	cfg.currentDuty = duty;
 	cfg.targetDuty = duty; // the next queued fade computes its range from here
-	ledc_set_duty(timer_.speed_mode, cfg.channel, duty);
+	states_[channel].updatePending = true;
 
 	if(update_immediately) {
 		debug_i("Updating duty for pin %d channel %d", cfg.gpioPin, cfg.channel);
-		ledc_update_duty(timer_.speed_mode, cfg.channel);
+		result = ledc_update_duty(timer_.speed_mode, cfg.channel);
+		if(result != ESP_OK) {
+			debug_e("setDutyChan: channel %u update failed: %s", channel, esp_err_to_name(result));
+			return false;
+		}
+		states_[channel].updatePending = false;
 	} else {
 		debug_i("duty for pin %d channel %d will be updated on next update() call", cfg.gpioPin, cfg.channel);
 	}
@@ -467,11 +480,20 @@ bool Esp32HardwarePwm::setPhaseShiftChan(uint8_t channel, uint32_t phase_shift, 
 	}
 
 	auto& cfg = pins_[channel];
+	auto result = ledc_set_duty_with_hpoint(timer_.speed_mode, cfg.channel, cfg.currentDuty, phase_shift);
+	if(result != ESP_OK) {
+		debug_e("setPhaseShiftChan: channel %u failed: %s", channel, esp_err_to_name(result));
+		return false;
+	}
 	cfg.hpoint = phase_shift;
-
-	ledc_set_duty_with_hpoint(timer_.speed_mode, cfg.channel, cfg.currentDuty, cfg.hpoint);
+	states_[channel].updatePending = true;
 	if(update_immediately) {
-		ledc_update_duty(timer_.speed_mode, cfg.channel);
+		result = ledc_update_duty(timer_.speed_mode, cfg.channel);
+		if(result != ESP_OK) {
+			debug_e("setPhaseShiftChan: channel %u update failed: %s", channel, esp_err_to_name(result));
+			return false;
+		}
+		states_[channel].updatePending = false;
 	}
 	return true;
 }
@@ -555,6 +577,7 @@ bool Esp32HardwarePwm::fadeHwChan(uint8_t channel_idx, uint32_t target_duty, uin
 		debug_e("fadeHwChan failed: %s", esp_err_to_name(result));
 		return false;
 	}
+	states_[channel_idx].updatePending = false;
 	if(useSteps) {
 		q.quantCarryUs = selection.errorUs;
 	}

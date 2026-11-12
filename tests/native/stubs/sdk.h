@@ -67,6 +67,9 @@ inline int startError = 0;
 inline uint32_t duty[2][8]{};
 inline uint32_t target[2][8]{};
 inline uint32_t frequency[2][4]{};
+inline bool fadeConfigured[2][8]{};
+inline int fadeReplays = 0;
+inline int dutyUpdates = 0;
 inline std::deque<std::pair<void (*)(uint32_t), uint32_t>> callbacks;
 }
 struct ledc_cb_param_t { int speed_mode; int channel; uint32_t duty; };
@@ -158,6 +161,7 @@ inline int ledc_timer_config(const ledc_timer_config_t* c) {
 inline int ledc_channel_config(const ledc_channel_config_t* c) {
 	Mock::duty[c->speed_mode][c->channel] = c->duty;
 	Mock::target[c->speed_mode][c->channel] = c->duty;
+	Mock::fadeConfigured[c->speed_mode][c->channel] = false;
 	return ESP_OK;
 }
 inline int ledc_cb_register(int mode, int ch, ledc_cbs_t* cb, void* arg) {
@@ -170,13 +174,22 @@ inline int ledc_set_freq(int mode, int timer, uint32_t freq) {
 }
 inline uint32_t ledc_get_freq(int mode, int timer) { return Mock::frequency[mode][timer]; }
 inline uint32_t ledc_get_duty(int mode, int ch) { return Mock::duty[mode][ch]; }
-inline int ledc_set_duty(int mode, int ch, uint32_t duty) { Mock::duty[mode][ch] = duty; return ESP_OK; }
-inline int ledc_update_duty(int, int) { return ESP_OK; }
+inline int ledc_set_duty(int mode, int ch, uint32_t duty) {
+	Mock::duty[mode][ch] = duty;
+	Mock::fadeConfigured[mode][ch] = false;
+	return ESP_OK;
+}
+inline int ledc_update_duty(int mode, int ch) {
+	++Mock::dutyUpdates;
+	if(Mock::fadeConfigured[mode][ch]) ++Mock::fadeReplays;
+	return ESP_OK;
+}
 inline int ledc_set_duty_with_hpoint(int mode, int ch, uint32_t duty, int) {
 	return ledc_set_duty(mode, ch, duty);
 }
 inline int ledc_fade_stop(int, int) { return ESP_OK; }
 inline int ledc_set_fade_step_and_start(int mode, int ch, uint32_t duty, int, uint32_t, int) {
+	Mock::fadeConfigured[mode][ch] = true;
 	++Mock::starts; Mock::target[mode][ch] = duty; return Mock::startError;
 }
 inline int ledc_set_fade_time_and_start(int mode, int ch, uint32_t duty, uint32_t, int) {
