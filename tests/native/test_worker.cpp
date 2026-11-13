@@ -334,6 +334,62 @@ int main()
 		worker.join();
 	}
 	drain();
+	// Shared-bank clients only flush and observe their own channels.
+	{
+		std::vector<uint8_t> sharedPins{4, 5};
+		Pwm bank(sharedPins, config);
+		assert(bank.isInitialized());
+		auto updates = Mock::dutyUpdates;
+		assert(bank.setDutyChan(0, 100, false));
+		assert(bank.setDutyChan(1, 200, false));
+		assert(bank.updateChan(0));
+		assert(Mock::dutyUpdates == updates + 1);
+		assert(bank.states_[1].updatePending);
+		assert(bank.updateChan(0));
+		assert(Mock::dutyUpdates == updates + 1);
+		assert(bank.updateChan(1));
+		assert(Mock::dutyUpdates == updates + 2);
+		assert(!bank.updateChan(2));
+		int completed = 0;
+		bank.setOnFadeDoneCallback([&](uint8_t channel) {
+			unlocked();
+			assert(channel == 0);
+			// Cancellation changes generation, not execution ownership.
+			bank.resetQueue(0);
+			assert(bank.hasPendingCallbacks(0));
+			assert(!bank.hasPendingCallbacks(1));
+			assert(bank.hasPendingCallbacks());
+			++completed;
+		});
+		bank.setOnQueueEmptyCallback([&](uint8_t channel) {
+			unlocked();
+			assert(channel == 0 && bank.hasPendingCallbacks(0));
+			assert(!bank.hasPendingCallbacks(1));
+		});
+		assert(bank.fadeChan(0, 300, 10));
+		Mock::complete(0, 0);
+		assert(bank.hasPendingCallbacks(0) && !bank.hasPendingCallbacks(1));
+		poll();
+		assert(bank.hasPendingCallbacks(0) && !bank.hasPendingCallbacks(1));
+		drain();
+		assert(completed == 1 && !bank.hasPendingCallbacks());
+		// Old-generation notifications cannot affect a replacement assignment.
+		assert(bank.fadeChan(0, 400, 10));
+		Mock::complete(0, 0);
+		poll();
+		bank.resetQueue(0);
+		assert(bank.setDutyChan(0, 0));
+		drain();
+		assert(completed == 1 && !bank.hasPendingCallbacks(0));
+		assert(bank.getDutyChan(1) == 200);
+		// Queue-empty callbacks also retain their channel identity while executing.
+		bank.setOnFadeDoneCallback({});
+		assert(bank.fadeChan(0, 500, 10));
+		Mock::complete(0, 0);
+		drain();
+		assert(!bank.hasPendingCallbacks());
+	}
+	drain();
 	// A normally initialized instance must release hardware without setFrequency().
 	{
 		const auto stops = Mock::stops;

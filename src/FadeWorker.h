@@ -86,7 +86,7 @@ private:
 	static void unregisterInstance(Esp32HardwarePwm* instance);
 	static bool ownsChannel(ledc_mode_t speedMode, ledc_channel_t channel);
 	static bool timerInUse(const Esp32HardwarePwm* except, ledc_mode_t speedMode, ledc_timer_t timer);
-	static bool hasNotifications(uint32_t instance);
+	static bool hasNotifications(uint32_t instance, int channel = -1);
 	static void clearNotifications(uint32_t instance, int channel = -1);
 	static size_t instanceCount();
 	static size_t notificationCount();

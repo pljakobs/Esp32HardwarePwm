@@ -244,10 +244,10 @@ bool FadeWorker::timerInUse(const Esp32HardwarePwm* except, ledc_mode_t speedMod
  * @param instance PWM instance identifier.
  * @return @c true if a notification is queued; otherwise @c false.
  */
-bool FadeWorker::hasNotifications(uint32_t instance)
+bool FadeWorker::hasNotifications(uint32_t instance, int channel)
 {
 	for(const auto& notification : notifications_) {
-		if(notification.instance == instance) {
+		if(notification.instance == instance && (channel < 0 || notification.channel == channel)) {
 			return true;
 		}
 	}
@@ -455,6 +455,7 @@ void FadeWorker::dispatch(uint32_t)
 			self->states_[n.channel].dispatching = true;
 		}
 		++self->callbacksInFlight_;
+		++self->states_[n.channel].callbacksInFlight;
 		unlock();
 		if(n.kind == Full || n.kind == Degraded) {
 			if(errorCb) {
@@ -468,6 +469,7 @@ void FadeWorker::dispatch(uint32_t)
 		self = findInstance(false);
 		if(self) {
 			--self->callbacksInFlight_;
+			--self->states_[n.channel].callbacksInFlight;
 		}
 		self = findInstance();
 		if(self && n.kind == Complete) {
@@ -478,6 +480,7 @@ void FadeWorker::dispatch(uint32_t)
 			if(!more) {
 				auto emptyCb = self->onQueueEmpty_;
 				++self->callbacksInFlight_;
+				++self->states_[n.channel].callbacksInFlight;
 				unlock();
 				if(emptyCb) {
 					emptyCb(n.channel);
@@ -486,6 +489,7 @@ void FadeWorker::dispatch(uint32_t)
 				self = findInstance(false);
 				if(self) {
 					--self->callbacksInFlight_;
+					--self->states_[n.channel].callbacksInFlight;
 				}
 			}
 		}
