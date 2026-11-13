@@ -2,6 +2,111 @@
 
 A comprehensive C++ wrapper for the ESP32 LEDC PWM functionality, designed for the Sming framework.
 
+## Experimental shared fade worker
+
+This branch uses **one unpinned FreeRTOS worker** (priority idle + 2, 4096-byte
+stack) for all instances. It runs on single-core and multi-core FreeRTOS
+configurations without SoC-name checks or affinity settings.
+
+The LEDC ISR publishes completion signals in internal RAM under a short
+FreeRTOS ISR critical section and wakes the worker. The worker consumes
+intermediate split segments and reloads hardware without entering the Sming
+dispatcher. Zero-range fades use absolute
+microsecond deadlines and one shared `esp_timer` wakeup, not `SimpleTimer`.
+Spread-spectrum updates share this worker as well.
+
+**Logical boundaries deliberately still wait for Sming.** The worker publishes
+one ordered completion per logical fade and pauses that channel. On the Sming
+task, `onFadeDone` runs **before** the next logical fade starts. Clearing,
+replacing or enqueueing inside the callback changes the continuation; no old
+continuation is applied after a reset/replacement. A blocked Sming loop therefore
+still adds gaps between logical fades, but not between their split segments.
+Wrap/error notifications also run deferred on Sming; API return values remain
+synchronous. Wrap is reported when the final cyclic entry is selected, as
+before, but its delegate is no longer called synchronously from `startQueue`.
+
+All queue/hardware mutations and callback registration serialize with the worker
+using a recursive task mutex. No application delegate runs under that mutex;
+the ISR never takes it. Failed `System.queueCallback` posts retry at least once
+per FreeRTOS tick until accepted. Notifications carry instance IDs and queue
+generations, not object addresses; both late ISRs and already-posted global
+trampolines remain safe after destruction. `hasPendingCallbacks()` includes
+pending ISR results and pending/executing notifications, but not an unfinished
+hardware fade/hold. Destruction cancels pending notifications. As with other
+C++ objects, callers must not race destruction with their own method calls or
+an application callback executing on another task. Self-deletion from a Sming
+callback is supported.
+
+Instances must own distinct hardware channels; overlapping allocations are
+rejected. The LEDC fade service remains globally installed. The classic ESP32's
+lack of `SOC_LEDC_SUPPORT_FADE_STOP` still limits cancellation: clearing queues
+and notifications is supported, but stopping the physical ramp is not. IDF
+hardware operations may synchronously wait for a ramp on these targets.
+Global PWM objects may precede IDF timer-service initialization; the worker
+retries creation of its shared deadline timer after startup rather than failing
+the PWM constructor. Successful LEDC timer configuration is tracked immediately
+so teardown also releases channels/timers when `setFrequency()` was never called.
+
+### Controller-owned banks and channel views
+
+An application can own one instance per populated LEDC speed-mode/timer bank
+and give lights non-owning channel assignments. Configure frequency, spread
+spectrum and phase placement on the bank owner. Channel indices are positions
+in the bank's complete GPIO vector, not positions within an individual light.
+
+Use `updateChan(channel)` to flush only an assigned channel's staged write,
+without latching another client's writes or replaying completed fades.
+`hasPendingCallbacks(channel)` includes that channel's ISR, queued and executing
+notifications, including callbacks which reset their queue. The original
+whole-instance `update()` and `hasPendingCallbacks()` remain available.
+Callback delegates are still instance-wide; polling light views must not
+overwrite them with per-light delegates. The owner must outlive all views.
+
+This arrangement provides one modulation schedule per centrally owned bank;
+legacy constructors do not enforce unique timer ownership.
+
+### Timing and calibration
+
+The previous **1500 µs Sming-dispatch estimate is not a worker measurement**.
+The uncalibrated default is now **zero compensation**, for all segments.
+`setReloadOverheadUs`, explicit calibration tables, carry reset rules and
+frequency-change recalculation retain their units and behavior.
+Automatic calibration headers must contain `#define HWPWM_CALIB_WORKER 1`;
+legacy headers remain present but are not automatically installed.
+Regenerate them rather than relabeling old measurements.
+
+`TimingTest_HwPWM` emits the new marker, starting with correction disabled.
+Its microfade channel measures **logical** transitions, including Sming load;
+that value is not necessarily suitable for intermediate worker reloads.
+Use `FadeTiming_HwPWM` traces and a logic analyser to distinguish ISR-to-worker
+reload gaps from logical callback gaps before choosing a common channel
+override. ESP32-C3 release hardware validation at 8 kHz/12-bit now covers the
+timing and callback samples, including split continuation through a two-second
+Sming-task stall, zero-range holds, reentrant FIFO/CYCLIC/streaming callbacks and
+two independent instances. See their READMEs for serial timing results.
+Physical edge timing, deadline-jitter distributions, CPU affinity benefits and
+other targets remain unmeasured; the default compensation remains zero.
+
+### Native regression tests
+
+Run `make -C tests/native test`. The production `.cpp` is compiled against
+small host SDK mocks, both with and without fade-stop capability. Tests cover
+split chaining without Sming, logical barriers, failed-post retries, timed/zero
+holds, reentrant clear/replace/enqueue, FIFO/CYCLIC, capacity errors,
+calibration, shared instances, concurrent public/worker serialization and
+teardown (including late ISR, queued trampoline and self-deletion).
+Deferred timer initialization and hardware release without frequency setters
+have dedicated regressions.
+The existing production cycle-selection tests are included.
+These mocks do not reproduce the IDF ISR/driver timing or FreeRTOS scheduler.
+The **Native Tests** GitHub Actions workflow runs this suite on every push and
+pull request, and can also be started manually. It needs no Sming SDK or hardware.
+
+`update()` latches only staged duty/phase writes. It does not re-trigger idle
+channels after a fade: LEDC retains the ramp configuration after completion,
+so an unconditional duty update can replay that ramp even when the cached
+target is zero. Native regressions cover this sequence and staged-write latching.
+
 ## Features
 
 - **Multiple PWM Instances**: Create multiple independent PWM instances with different configurations
@@ -255,6 +360,9 @@ void disableFade();   // cancel this instance's fades; leaves the shared service
 
 // Immediate fade (resets queue, starts now); queue=true enqueues instead
 bool fadeChan(uint8_t channel, uint32_t target_duty, uint32_t fade_time_ms, bool queue = false);
+// Worker-generated microfades bounded by max_cycles and 500 ms
+bool fadeChanWithCycleLimit(uint8_t channel, uint32_t target_duty, uint32_t fade_time_ms,
+                            uint32_t max_cycles, bool queue = false);
 // Same but target is a percentage (0.0 – 100.0); cie=true applies CIE 1931 correction
 bool fadePercentChan(uint8_t channel, float target_pct, uint32_t fade_time_ms, bool cie = false, bool queue = false);
 // Returns true while a hardware fade is in progress
@@ -263,9 +371,13 @@ bool isFadingChan(uint8_t channel) const;
 
 #### Fade Queue
 
-Each channel has an independent fade queue that can chain multiple fades without
-application polling.  The queue depth defaults to `FADE_QUEUE_DEPTH` (10) and can
-be changed per-channel at runtime before the queue is filled.
+Each channel has an independent fade-command queue that can chain multiple fades
+without application polling. The cycle-limited API stores each top-level command
+as one queue entry; FadeWorker generates its duty-interpolated microfades
+incrementally, each no longer than 500 ms. When a hardware-safe fade step must
+finish early, the worker holds its target until the segment boundary before
+continuing the command. The queue depth defaults to `FADE_QUEUE_DEPTH` (10) and
+can be changed per-channel at runtime before the queue is filled.
 
 ##### Modes
 
@@ -386,34 +498,17 @@ segment, so timing accuracy under modulation is not guaranteed. Likewise,
 application polling delays, busy task queues and network delivery are not
 repaid by this arithmetic correction.
 
-### 2. Queue-reload latency (applies to every step when chaining short fades)
+### 2. Queue-reload latency
 
-When the LEDC fade-done ISR fires, the library posts a FreeRTOS message to the
-Sming main-task queue.  The main task dequeues the entry and calls
-the IDF fade-start API for the next step. Three sub-sources contribute:
-
-| Sub-source | Typical cost |
-|---|---|
-| ISR → Sming task-queue post | < 10 µs |
-| FreeRTOS task wake-up + context switch | ~10–50 µs |
-| LEDC timer-cycle sync (next fade starts on next timer edge) | 2–3 timer periods |
-
-The dominant term is the **timer-cycle sync**.  LEDC cannot start a new fade
-mid-cycle; the `ledc_set_fade_time_and_start` call itself takes some time, and
-by the time the hardware receives the start command the current timer cycle may
-already be more than one period ahead.  In practice, 2–3 timer periods elapse
-between the ISR firing and the next fade actually beginning.
-
-### 3. Code-execution overhead
-
-The path through the ISR, the FreeRTOS message, and `ledc_set_fade_time_and_start`
-itself takes a few tens of microseconds.  This is negligible compared to the
-timer-sync penalty for all practical frequencies (≤ 40 kHz) and cannot be
-eliminated without a custom IDF patch that chains fades from within the ISR.
+Intermediate segments now traverse ISR → worker → IDF; logical fade boundaries
+add Sming notification dispatch and application execution before starting the
+next fade. LEDC timer-edge synchronization still contributes. Neither path has
+been measured on this experimental branch; see the timing/calibration notes
+above rather than applying the old Sming-only latency estimates.
 
 ### Measured results
 
-The following historical table predates carried nearest-cycle selection. It
+The following historical table predates the worker and carried nearest-cycle selection. It
 was produced by `samples/TimingTest_HwPWM` running a 60 s
 fade on an ESP32 (3000 × 20 ms micro-fades for the reload overhead measurement):
 
@@ -439,7 +534,7 @@ Key observations:
   and higher bit depth both reduce per-step latency**.
 - **Higher frequency always reduces per-step latency**, regardless of bit depth.
 
-### Choosing timer parameters
+### Historical timer-parameter observations (not worker validation)
 
 | Goal | Recommendation |
 |---|---|

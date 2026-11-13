@@ -20,11 +20,12 @@ constexpr size_t TRACE_CAPACITY = 1024;
 Trace traces[TRACE_CAPACITY];
 std::atomic<uint32_t> traceCount{0};
 std::atomic<bool> recording{false};
-std::vector<uint8_t> pins{4, 1, 3, 5, 0};
+std::vector<uint8_t> pins{5, 4, 1, 0, 3};
 Esp32HardwarePwm* pwm;
 SimpleTimer nextTimer;
 SimpleTimer pollTimer;
 SimpleTimer watchdog;
+SimpleTimer loadTimer;
 unsigned testIndex;
 unsigned finishedChannels;
 unsigned externalSteps[5];
@@ -42,6 +43,7 @@ struct Test {
 	unsigned startPercent = 0;
 	unsigned targetPercent = 100;
 	bool cyclic = false;
+	bool blocked = false;
 };
 const Test tests[] = {
 	{"single", false, false, false, false, true},
@@ -55,6 +57,7 @@ const Test tests[] = {
 	{"5-to-95pct", false, false, false, false, false, 5, 95},
 	{"full-down", false, false, false, false, false, 100, 0},
 	{"cyclic-500ms", true, false, false, false, true, 0, 100, true},
+	{"single-main-load", false, false, false, false, true, 0, 100, false, true},
 };
 constexpr unsigned REPEATS = 3;
 constexpr unsigned TEST_COUNT = sizeof(tests) / sizeof(tests[0]);
@@ -70,6 +73,7 @@ void finishTest()
 {
 	recording.store(false, std::memory_order_relaxed);
 	watchdog.stop();
+	loadTimer.stop();
 	pollTimer.stop();
 	const auto& test = currentTest();
 	uint32_t count = traceCount.load(std::memory_order_relaxed);
@@ -172,6 +176,8 @@ void runTest()
 		pwm->setOnFadeDoneCallback([](uint8_t ch) {
 			if(++externalSteps[ch] == 6) {
 				pwm->resetQueue(ch);
+				// Explicit cancellation invalidates this dispatch and its empty callback.
+				completeChannel(ch);
 			}
 		});
 	}
@@ -206,6 +212,16 @@ void runTest()
 	if(test.external) {
 		pollTimer.initializeMs<20>(pollExternal).start();
 	}
+	if(test.blocked) {
+		loadTimer.initializeMs<300>([]() {
+			const auto begin = esp_timer_get_time();
+			while(esp_timer_get_time() - begin < 2000000) {
+				os_delay_us(1000);
+				vTaskDelay(1);
+			}
+			Serial.printf("LOAD,%lld,%lld\n", begin - startTime, esp_timer_get_time() - startTime);
+		}).startOnce();
+	}
 	watchdog
 		.initializeMs<15000>([]() {
 			failed = true;
@@ -233,6 +249,6 @@ void init()
 #endif
 	Serial.begin(SERIAL_BAUD_RATE);
 	Serial.systemDebugOutput(false);
-	Serial.printf("FadeTiming_HwPWM,%uHz,12bit,GPIO=4/1/3/5/0\n", unsigned(FADE_TIMING_FREQUENCY));
+	Serial.printf("FadeTiming_HwPWM,%uHz,12bit,L1-L5=5/4/1/0/3\n", unsigned(FADE_TIMING_FREQUENCY));
 	nextTimer.initializeMs<2000>(runTest).startOnce();
 }

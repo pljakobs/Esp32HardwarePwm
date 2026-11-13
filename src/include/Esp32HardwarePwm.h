@@ -16,7 +16,7 @@
  * - Hardware-accelerated linear fading
  * - Per-channel FIFO and CYCLIC fade queues with automatic sequencing
  * - Split of large-range fades to work around the LEDC step_num ≤ 1023 limit
- * - Per-reload timing compensation to reduce accumulated latency in queued sequences
+ * - Configurable per-reload timing compensation (uncalibrated worker default: zero)
  * - Application callbacks: fade-done, queue-empty, cyclic-wrap, queue-error
  */
 
@@ -27,8 +27,8 @@
 
 #pragma once
 
-#include <atomic>
 #include <cstdint>
+#include <cmath>
 #include <vector>
 #include <driver/ledc.h>
 #include <esp_timer.h>
@@ -36,8 +36,8 @@
 #include <array>
 #include <esp_attr.h>
 #include <Delegate.h>
-#include <SimpleTimer.h>
-#include <memory>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // ---------------------------------------------------------------------------
 // Per-channel fade queue depth — override before including this header.
@@ -45,6 +45,8 @@
 #ifndef FADE_QUEUE_DEPTH
 #define FADE_QUEUE_DEPTH 10
 #endif
+
+class FadeWorker;
 
 // ---------------------------------------------------------------------------
 // Debug level control for Esp32HardwarePwm
@@ -83,8 +85,8 @@
  * - `onQueueError` callback for `QUEUE_FULL` and `SPLIT_DEGRADED` conditions
  *
  * **Safe teardown**
- * - `hasPendingCallbacks()` lets callers defer `delete` until all queued
- *   task-context dispatches have drained, preventing use-after-free
+ * - Static ISR/deferred contexts never retain a destroyed instance
+ * - `hasPendingCallbacks()` reports pending or executing user notifications
  *
  * Channel index is the 0-based position in the `pins[]` vector passed to the
  * constructor, independent of GPIO number or LEDC hardware channel number.
@@ -364,6 +366,17 @@ public:
 	 */
 	bool fadeChan(uint8_t channel_idx, uint32_t target_duty, uint32_t fade_time_ms, bool queue = false);
 
+	/** @brief Fade to a target while limiting generated hardware microfades.
+	 * @param channel_idx Channel index
+	 * @param target_duty Target duty value
+	 * @param fade_time_ms Total requested command duration
+	 * @param max_cycles Maximum PWM cycles allowed per duty-count change
+	 * @param queue If false, replaces any current fade; if true, enqueues the command
+	 * @return true if started/enqueued successfully
+	 */
+	bool fadeChanWithCycleLimit(uint8_t channel_idx, uint32_t target_duty, uint32_t fade_time_ms,
+								uint32_t max_cycles, bool queue = false);
+
 	/** @brief Hardware linear fade on a channel (percentage target).
 	 * @param channel_idx Channel index
 	 * @param target_pct Target duty as percentage (0.0–100.0)
@@ -484,35 +497,41 @@ public:
 	/** @brief Callback fired after every individual fade completes (even if more are queued) */
 	void setOnFadeDoneCallback(Delegate<void(uint8_t)> cb)
 	{
+		Guard guard;
 		onFadeDone_ = cb;
 	}
 
 	/** @brief Callback fired when a FIFO queue drains to empty */
 	void setOnQueueEmptyCallback(Delegate<void(uint8_t)> cb)
 	{
+		Guard guard;
 		onQueueEmpty_ = cb;
 	}
 
 	/** @brief Callback fired each time a CYCLIC queue wraps back to entry 0 */
 	void setOnCyclicWrapCallback(Delegate<void(uint8_t)> cb)
 	{
+		Guard guard;
 		onCyclicWrap_ = cb;
 	}
 
-	/** @brief Callback fired when a fadeChan(queue=true) call fails or degrades.
+	/** @brief Sming-task callback fired when a fadeChan(queue=true) call fails or degrades.
 	 *  The callback receives the channel index and the QueueError reason.
 	 *  For QUEUE_FULL the fade was not enqueued; for SPLIT_DEGRADED the fade
-	 *  was enqueued unsplit (hardware timing accuracy may be reduced). */
+	 *  was enqueued unsplit (hardware timing accuracy may be reduced).
+	 *  Notifications are deferred, including errors from synchronous API calls. */
 	void setOnQueueErrorCallback(Delegate<void(uint8_t, QueueError)> cb)
 	{
+		Guard guard;
 		onQueueError_ = cb;
 	}
 
-	/** @brief Returns true if there are unprocessed ISR results or a
-	 *  dispatchFadeCallbacks task already queued in the Sming task queue.
+	/** @brief Returns true for unprocessed ISR results or pending/executing
+	 *  user notifications belonging to this instance.
 	 *
 	 *  Use this before deleting the object from task context to ensure no
-	 *  stale task-queue entry still holds a pointer to it:
+	 *  outstanding notifications are delivered before teardown. Destruction
+	 *  itself safely cancels them; global deferred entries contain no object pointer:
 	 *  @code
 	 *    if(pwm->hasPendingCallbacks()) {
 	 *        System.queueCallback(tryTeardown);  // re-defer
@@ -521,10 +540,12 @@ public:
 	 *    delete pwm;
 	 *  @endcode
 	 */
-	bool hasPendingCallbacks() const
-	{
-		return pendingFadeCallbacks_.load(std::memory_order_relaxed) != 0 || fadeCallbackQueued_;
-	}
+	bool hasPendingCallbacks() const;
+	/** @brief Check pending/executing notifications for one bank-local channel. */
+	bool hasPendingCallbacks(uint8_t channel) const;
+
+	/** @brief Latch only this channel's staged duty/phase write, never an active fade. */
+	bool updateChan(uint8_t channel);
 
 	// -----------------------------------------------------------------------
 	// Legacy interface — GPIO-pin-indexed (use channel interface for new code)
@@ -585,13 +606,35 @@ public:
 	void startAll();
 
 private:
+	friend class FadeWorker;
+
+	static void lock();
+	static void unlock();
+	struct Guard {
+		Guard() { lock(); }
+		~Guard() { unlock(); }
+	};
+	void notify(uint8_t channel, uint8_t kind);
+	uint32_t instanceId_ = 0;
+	uint32_t callbacksInFlight_ = 0;
+	struct ChannelState {
+		uint32_t generation = 0;
+		uint32_t callbacksInFlight = 0;
+		int64_t deadlineUs = 0;
+		bool notifyCompletion = false;
+		bool awaitingDispatch = false;
+		bool dispatching = false;
+		bool updatePending = false;
+	};
+	std::vector<ChannelState> states_;
 	/** @brief Internal: enqueue a fade (absolute duty). Used by fadeChan(). */
-	bool queueDutyChan(uint8_t channel, uint32_t targetDuty, uint32_t fadeTimeMs);
+	bool queueDutyChan(uint8_t channel, uint32_t targetDuty, uint32_t fadeTimeMs, uint32_t maxCycles = 0);
 
 	struct FadeEntry {
 		uint32_t targetDuty;
 		uint32_t fadeTimeMs;
 		bool isPartial = false; ///< True for intermediate segments of a split long-range fade
+		uint32_t maxCycles = 0;
 	};
 
 	struct ChannelFadeQueue {
@@ -606,6 +649,13 @@ private:
 		int32_t carryUs = 0;			   ///< Sub-ms accumulator for reload overhead correction
 		int64_t quantCarryUs = 0;		   ///< Signed requested-minus-selected hardware time, in microseconds
 		bool activeIsIntermediate = false; ///< True when the executing entry is a partial (intermediate) split segment
+		bool workerFadeActive = false;
+		uint32_t workerStartDuty = 0;
+		uint32_t workerTargetDuty = 0;
+		uint32_t workerDurationMs = 0;
+		uint32_t workerMaxCycles = 0;
+		int64_t workerStartUs = 0;
+		int64_t workerHoldUntilUs = 0;
 	};
 
 	struct PinConfig {
@@ -615,35 +665,23 @@ private:
 		uint32_t targetDuty = 0;				 ///< Target duty for in-progress fade
 		int hpoint = 0;							 ///< Phase shift hpoint
 		bool isActive = false;					 ///< True when channel is running
+		bool configured = false;
 	};
-
-	// Context block passed to steadyFadeTimerCb — one per channel, stable address.
-	struct SteadyFadeContext {
-		Esp32HardwarePwm* self;
-		uint8_t channel_idx;
-	};
-	std::vector<SteadyFadeContext> steadyFadeCtx_;
-	std::vector<std::unique_ptr<SimpleTimer>> steadyFadeTimers_;
 
 	TimerConfig timer_;
 	SpreadSpectrumConfig spreadSpectrum_;
-	esp_timer_handle_t spreadSpectrumTimer_ = nullptr;
+	int64_t nextSpectrumUs_ = 0;
+	uint32_t spectrumIntervalUs_ = 0;
 	PhaseShiftConfig phaseShift_;
 	std::vector<PinConfig> pins_;
 	std::vector<ChannelFadeQueue> fadeQueues_;
 
 	bool initialized_ = false;
+	bool timerConfigured_ = false;
 	bool fadeEnabled_ = false;
 
 	// Per-channel fade-done flags, set from LEDC fade callback (ISR-safe)
-	std::array<volatile bool, SOC_LEDC_CHANNEL_NUM> fadeDone_{};
-
-	// ISR → task handoff for fade completion
-	// Written from the LEDC fade ISR (potentially on either core) and
-	// read+cleared in task context — must be atomic to avoid torn reads
-	// on the dual-core ESP32.
-	std::atomic<uint32_t> pendingFadeCallbacks_{0};
-	volatile bool fadeCallbackQueued_ = false;
+	std::array<bool, SOC_LEDC_CHANNEL_NUM> fadeDone_{};
 
 	// Application-level callbacks
 	Delegate<void(uint8_t)> onFadeDone_;
@@ -713,26 +751,18 @@ private:
 	// Fade callback registered with ledc_cb_register per channel — runs in ISR context
 	static bool IRAM_ATTR fadeDoneCallback(const ledc_cb_param_t* param, void* arg);
 
-	// Task-context dispatcher — deferred from ISR via System.queueCallback
-	static void dispatchFadeCallbacks(uint32_t param);
-
 	// Dequeue the head entry from a FIFO queue (advances head, decrements count)
 	FadeEntry dequeueFifo(ChannelFadeQueue& q);
 
 	// Start the next fade from the queue; returns false if queue empty
 	bool startNextFade(uint8_t channel_idx);
+	bool startWorkerFadeSegment(uint8_t channel_idx);
 
 	// Cancel any in-flight or queued fade on a channel (hardware fade, steady hold, pending callback)
 	void abortFadeChan(uint8_t channel_idx);
 
 	// Raw LEDC hardware fade — used by startNextFade only; bypasses queue and split logic
 	bool fadeHwChan(uint8_t channel_idx, uint32_t target_duty, uint32_t fade_time_ms);
-
-	// esp_timer callback — runs in task context, static wrapper required for C function pointer
-	static void spreadSpectrumTimerCb(void* arg);
-
-	// SimpleTimer callback for zero-range (x→x) fades — fires after fadeTimeMs elapses
-	static void steadyFadeTimerCb(void* arg);
 
 	// -----------------------------------------------------------------
 	// CIE 1931 perceptual correction
