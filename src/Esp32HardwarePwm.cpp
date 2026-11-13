@@ -382,6 +382,7 @@ void Esp32HardwarePwm::update()
 				debug_e("update: channel %u failed: %s", unsigned(i), esp_err_to_name(result));
 			} else {
 				states_[i].updatePending = false;
+				PWM_TIMING_TRACE(5, i, pin.currentDuty, 0);
 			}
 		}
 	}
@@ -453,6 +454,7 @@ bool Esp32HardwarePwm::setDutyChan(uint8_t channel, uint32_t duty, bool update_i
 			return false;
 		}
 		states_[channel].updatePending = false;
+		PWM_TIMING_TRACE(5, channel, duty, 0);
 	} else {
 		debug_i("duty for pin %d channel %d will be updated on next update() call", cfg.gpioPin, cfg.channel);
 	}
