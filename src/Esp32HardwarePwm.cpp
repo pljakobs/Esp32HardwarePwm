@@ -372,19 +372,31 @@ void Esp32HardwarePwm::update()
 		return;
 	}
 
-	// Only latch staged writes. LEDC retains ramp registers after completion;
-	// reasserting duty_start without a new duty write can replay the old fade.
 	for(size_t i = 0; i < pins_.size(); ++i) {
-		const auto& pin = pins_[i];
-		if(pin.isActive && fadeDone_[i] && states_[i].updatePending) {
-			const auto result = ledc_update_duty(timer_.speed_mode, pin.channel);
-			if(result != ESP_OK) {
-				debug_e("update: channel %u failed: %s", unsigned(i), esp_err_to_name(result));
-			} else {
-				states_[i].updatePending = false;
-			}
-		}
+		updateChan(i);
 	}
+}
+
+bool Esp32HardwarePwm::updateChan(uint8_t channel)
+{
+	Guard guard;
+	if(!initialized_ || channel >= pins_.size()) {
+		debug_e("updateChan: not initialized or channel %u out of range", unsigned(channel));
+		return false;
+	}
+	// LEDC retains completed ramp registers; only latch a fresh staged write.
+	const auto& pin = pins_[channel];
+	if(!pin.isActive || !fadeDone_[channel] || !states_[channel].updatePending) {
+		return true;
+	}
+	const auto result = ledc_update_duty(timer_.speed_mode, pin.channel);
+	if(result != ESP_OK) {
+		debug_e("updateChan: channel %u failed: %s", unsigned(channel), esp_err_to_name(result));
+		return false;
+	}
+	states_[channel].updatePending = false;
+	PWM_TIMING_TRACE(5, channel, pin.currentDuty, 0);
+	return true;
 }
 
 void Esp32HardwarePwm::stopAll(bool idle_level)
@@ -453,6 +465,7 @@ bool Esp32HardwarePwm::setDutyChan(uint8_t channel, uint32_t duty, bool update_i
 			return false;
 		}
 		states_[channel].updatePending = false;
+		PWM_TIMING_TRACE(5, channel, duty, 0);
 	} else {
 		debug_i("duty for pin %d channel %d will be updated on next update() call", cfg.gpioPin, cfg.channel);
 	}
@@ -848,13 +861,24 @@ bool Esp32HardwarePwm::hasPendingCallbacks() const
 		return true;
 	}
 	for(uint8_t i = 0; i < pins_.size(); ++i) {
-		const auto& state = states_[i];
-		if(state.awaitingDispatch || state.dispatching ||
-		   FadeWorker::hasPendingSignal(timer_.speed_mode, pins_[i].channel)) {
+		if(hasPendingCallbacks(i)) {
 			return true;
 		}
 	}
-	return FadeWorker::hasNotifications(instanceId_);
+	return false;
+}
+
+bool Esp32HardwarePwm::hasPendingCallbacks(uint8_t channel) const
+{
+	Guard guard;
+	if(!initialized_ || channel >= pins_.size()) {
+		debug_e("hasPendingCallbacks: not initialized or channel %u out of range", unsigned(channel));
+		return false;
+	}
+	const auto& state = states_[channel];
+	return state.callbacksInFlight || state.awaitingDispatch || state.dispatching ||
+		   FadeWorker::hasPendingSignal(timer_.speed_mode, pins_[channel].channel) ||
+		   FadeWorker::hasNotifications(instanceId_, channel);
 }
 
 Esp32HardwarePwm::FadeEntry Esp32HardwarePwm::dequeueFifo(ChannelFadeQueue& q)

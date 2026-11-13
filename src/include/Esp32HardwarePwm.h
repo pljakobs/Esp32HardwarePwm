@@ -541,6 +541,11 @@ public:
 	 *  @endcode
 	 */
 	bool hasPendingCallbacks() const;
+	/** @brief Check pending/executing notifications for one bank-local channel. */
+	bool hasPendingCallbacks(uint8_t channel) const;
+
+	/** @brief Latch only this channel's staged duty/phase write, never an active fade. */
+	bool updateChan(uint8_t channel);
 
 	// -----------------------------------------------------------------------
 	// Legacy interface — GPIO-pin-indexed (use channel interface for new code)
@@ -614,6 +619,7 @@ private:
 	uint32_t callbacksInFlight_ = 0;
 	struct ChannelState {
 		uint32_t generation = 0;
+		uint32_t callbacksInFlight = 0;
 		int64_t deadlineUs = 0;
 		bool notifyCompletion = false;
 		bool awaitingDispatch = false;

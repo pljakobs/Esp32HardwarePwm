@@ -47,6 +47,24 @@ retries creation of its shared deadline timer after startup rather than failing
 the PWM constructor. Successful LEDC timer configuration is tracked immediately
 so teardown also releases channels/timers when `setFrequency()` was never called.
 
+### Controller-owned banks and channel views
+
+An application can own one instance per populated LEDC speed-mode/timer bank
+and give lights non-owning channel assignments. Configure frequency, spread
+spectrum and phase placement on the bank owner. Channel indices are positions
+in the bank's complete GPIO vector, not positions within an individual light.
+
+Use `updateChan(channel)` to flush only an assigned channel's staged write,
+without latching another client's writes or replaying completed fades.
+`hasPendingCallbacks(channel)` includes that channel's ISR, queued and executing
+notifications, including callbacks which reset their queue. The original
+whole-instance `update()` and `hasPendingCallbacks()` remain available.
+Callback delegates are still instance-wide; polling light views must not
+overwrite them with per-light delegates. The owner must outlive all views.
+
+This arrangement provides one modulation schedule per centrally owned bank;
+legacy constructors do not enforce unique timer ownership.
+
 ### Timing and calibration
 
 The previous **1500 µs Sming-dispatch estimate is not a worker measurement**.
@@ -81,6 +99,8 @@ Deferred timer initialization and hardware release without frequency setters
 have dedicated regressions.
 The existing production cycle-selection tests are included.
 These mocks do not reproduce the IDF ISR/driver timing or FreeRTOS scheduler.
+The **Native Tests** GitHub Actions workflow runs this suite on every push and
+pull request, and can also be started manually. It needs no Sming SDK or hardware.
 
 `update()` latches only staged duty/phase writes. It does not re-trigger idle
 channels after a fade: LEDC retains the ramp configuration after completion,

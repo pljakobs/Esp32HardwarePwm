@@ -1,0 +1,17 @@
+name: Native Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run worker and cycle-selection regressions
+        run: make -C tests/native test
