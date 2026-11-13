@@ -41,4 +41,3 @@ ifneq ($(wildcard $(HWPWM_CALIB_HDR)),)
   COMPONENT_INCDIRS  += src/calibration
   $(info Esp32HardwarePwm: inspecting SOC calibration table $(HWPWM_CALIB_HDR) (worker marker required))
 endif
-

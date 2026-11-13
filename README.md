@@ -99,6 +99,8 @@ Deferred timer initialization and hardware release without frequency setters
 have dedicated regressions.
 The existing production cycle-selection tests are included.
 These mocks do not reproduce the IDF ISR/driver timing or FreeRTOS scheduler.
+The **Native Tests** GitHub Actions workflow runs this suite on every push and
+pull request, and can also be started manually. It needs no Sming SDK or hardware.
 
 `update()` latches only staged duty/phase writes. It does not re-trigger idle
 channels after a fade: LEDC retains the ramp configuration after completion,
